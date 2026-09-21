@@ -1,0 +1,4 @@
+config = dict(
+    api_url="https://replace-with-api-url",
+    api_token="REPLACE-WITH-REDCAP-API-KEY",
+)
