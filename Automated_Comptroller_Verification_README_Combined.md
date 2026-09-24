@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Tool file** | `verify_record_website.py` |
+| **Tool file** | `automated_comptroller_verifier.py` |
 | **Applies to** | Comptroller REDCap records |
 | **Audience** | Project staff, supervisors, advisors, and authorized users who run or review the tool |
 
@@ -80,7 +80,7 @@ The project can support public health by:
 
 ## 5. What Program Performs the Automation?
 
-The automation is performed by a Python program. The main application file is `verify_record_website.py`. Python controls the workflow, reads the REDCap export spreadsheet, reviews organization websites, compares information, applies the program's safety rules, creates result files, and, when authorized, sends approved changes to REDCap through the REDCap API.
+The automation is performed by a Python program. The main application file is `automated_comptroller_verifier.py`. Python controls the workflow, reads the REDCap export spreadsheet, reviews organization websites, compares information, applies the program's safety rules, creates result files, and, when authorized, sends approved changes to REDCap through the REDCap API.
 
 The main components are:
 
@@ -93,6 +93,53 @@ The main components are:
 - **Organization websites:** provide the current public information used for verification.
 
 The current verification tool uses the website already stored in each REDCap record. It does not automatically search the internet for a replacement website when a website is missing. A missing or unusable website is reported for manual review.
+
+## General Coding Process
+
+The automation was developed in small steps so each part could be tested before use with real REDCap records.
+
+1. Identify the REDCap fields the program needs to review or update.
+2. Read the current REDCap export spreadsheet into Python.
+3. Clean and standardize values such as organization names, addresses, phone numbers, state abbreviations, ZIP codes, and website URLs.
+4. Compare the REDCap information with information available on the organization website listed in the record.
+5. Classify each result as no change, potential update, manual review, or another condition requiring attention.
+6. Do not guess when information is unclear; send uncertain cases for human review.
+7. Use dry-run mode to preview proposed changes without writing to REDCap.
+8. When `--apply` is intentionally used, confirm the REDCap project, re-check the current live value, and update only fields that meet the safety rules.
+9. Save results in the output workbook so the reviewer can see what was checked, what changed, and what still requires review.
+10. Test a small number of records before processing a larger batch.
+
+## General Tasks That Can Be Automated
+
+The application can automate many repetitive data-quality tasks:
+
+- Read existing organization information from the REDCap export spreadsheet.
+- Standardize and compare selected values.
+- Compare phone and fax numbers while ignoring formatting differences.
+- Identify email addresses available through website links.
+- Compare mailing addresses and selected social-media links.
+- Detect clear website redirects that may indicate a website change.
+- Identify possible facility-name changes and send them for manual review.
+- Identify some additional branch or office locations listed on an organization's website.
+- Create a comparison and review workbook.
+- Write clear changes to REDCap through the API when `--apply` is used and all safety rules are met.
+- Record processing results and notes for review.
+
+## Tasks That Should Not Be Fully Automated
+
+Some decisions require context and human judgment. The application can provide supporting information, but a person should make the final decision when needed.
+
+- Confirming a facility or organization name change.
+- Resolving cases with several possible phone numbers, fax numbers, email addresses, or addresses.
+- Determining whether organizations with similar names represent the same facility.
+- Determining whether an organization moved or operates several locations.
+- Deciding whether an additional location found on a website should be added as a new REDCap record.
+- Resolving conflicting or unclear information from different parts of a website.
+- Interpreting information that is not clearly stated on the website.
+- Deciding whether existing REDCap information should be removed when it is not found online.
+
+A matching name, address, or other value can provide useful evidence, but it is not always enough for a final decision. Human review helps protect the accuracy of the REDCap database.
+
 
 ## 6. What This Tool Does
 
@@ -142,6 +189,8 @@ The following rules are built into the application to help make it safe to use w
 - **It never overwrites a recent change made by another user.** Before updating any field, the application checks the current live value in REDCap. If that value has changed since the original spreadsheet was exported, the application skips that field instead of overwriting the newer information.
 - **It never partly updates a record.** Before writing anything, the application checks the live REDCap value of every field it's about to change on that record. If even one no longer matches what the change was based on, nothing for that record is written -- not just the mismatched field. This avoids a record ending up with some fields updated and others silently left stale from the same run.
 - **A new location is only created automatically when the application is confident, and only after checking for duplicates.** A brand-new REDCap record is only created for an additional location found on a website when it has an identifiable name, a street number, and its own website, and the application doesn't find what looks like the same location already tracked elsewhere in REDCap. Anything missing, or anything that looks like a possible duplicate, is left on the Other Locations worksheet for a person to decide instead.
+
+
 
 ## 9. Setup Requirements
 
@@ -193,17 +242,17 @@ Each run requires one or more Record IDs and the REDCap export spreadsheet.
 **Basic shape:**
 
 ```
-python verify_record_website.py <record id(s)> --xlsx <spreadsheet file>
+python automated_comptroller_verifier.py <record id(s)> --xlsx <spreadsheet file>
 ```
 
 **Common examples:**
 
 | You want to… | Command |
 |---|---|
-| Preview one record | `python verify_record_website.py 400 --xlsx export.xlsx` |
-| Preview a range of records | `python verify_record_website.py 3-50 --xlsx export.xlsx` |
-| Preview a specific mix of records | `python verify_record_website.py 3 5 8 12-15 --xlsx export.xlsx` |
-| Actually write the confirmed changes to REDCap | `python verify_record_website.py 400 --xlsx export.xlsx --apply` |
+| Preview one record | `python automated_comptroller_verifier.py 400 --xlsx export.xlsx` |
+| Preview a range of records | `python automated_comptroller_verifier.py 3-50 --xlsx export.xlsx` |
+| Preview a specific mix of records | `python automated_comptroller_verifier.py 3 5 8 12-15 --xlsx export.xlsx` |
+| Actually write the confirmed changes to REDCap | `python automated_comptroller_verifier.py 400 --xlsx export.xlsx --apply` |
 
 ### Dry run vs. Apply
 
@@ -367,6 +416,12 @@ Automation also has important limitations:
 - The free address-lookup services used to determine a new location's county don't cover every address; some new records may need their county filled in by hand.
 - A website's contact/location pages sometimes display a different phone number than what's embedded in the page's own listing (for example, call-tracking numbers that can change depending on how the page was reached). The tool prefers the number in the site's own "locations" listing where one exists, but this isn't foolproof for every site.
 
+**Limitations of Additional new locations:**
+
+The additional-locations feature is a helpful screening tool, but it may not identify every branch or office location associated with an organization. Some websites list locations on a separate webpage or URL that the application may not reach during its normal review. In other cases, location information may be loaded dynamically, displayed in a format that the application cannot reliably parse, or organized in a way that prevents the program from recognizing each location.
+
+For this reason, the **Other Locations** results should not be treated as a complete list of all locations for an organization. When a complete location review is important, the reviewer should also check the organization's website manually, including its Locations, Contact, Find a Location, or similar pages. Any location identified by the application should still be reviewed before it is added to REDCap.
+
 ## 17. Data Quality and Safety Rules
 
 The following rules are used to protect REDCap data and support accurate review:
@@ -390,9 +445,21 @@ The following rules are used to protect REDCap data and support accurate review:
 
 The current verification process can be summarized as:
 
-REDCap Export Spreadsheet → Python (`verify_record_website.py`) → Read Existing Record and Website → Review Organization Website → Extract Available Information → Compare Website Information with REDCap → Apply Safety and Manual-Review Rules → Dry-Run Results → Human Review → Optional `--apply` → REDCap API Update → Record Summary and Other Locations Workbook
+REDCap Export Spreadsheet → Python (`automated_comptroller_verifier.py`) → Read Existing Record and Website → Review Organization Website → Extract Available Information → Compare Website Information with REDCap → Apply Safety and Manual-Review Rules → Dry-Run Results → Human Review → Optional `--apply` → REDCap API Update → Record Summary and Other Locations Workbook
 
 The normal process should begin with a dry run. The user reviews the results and any manual-review notes. If the proposed changes are correct and the user is authorized to update the project, selected records can then be run with `--apply`. Before a field is written, the program checks the live REDCap value again to protect newer changes.
+
+## Program Structure
+
+The project is organized around the main verification script and supporting files:
+
+- `automated_comptroller_verifier.py`: the main application. It reads requested records, reviews the website on file, compares selected information, applies safety rules, creates the results workbook, and performs authorized REDCap updates.
+- `redcap_config.py`: the local configuration file used for REDCap API access when real updates are requested. This file contains a credential and must be kept secure.
+- REDCap export `.xlsx`: the read-only source containing exported record information used for comparison.
+- Output workbook: contains the Record Summary and Other Locations tabs for review.
+
+This structure separates the source data, verification process, REDCap connection, and review output so the workflow is easier to test, review, and maintain.
+
 
 ## 19. Questions and Troubleshooting
 

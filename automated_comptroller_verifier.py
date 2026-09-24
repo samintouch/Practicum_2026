@@ -51,11 +51,11 @@ and every applied record gets `change` set to Yes with a dated note
 appended to `change_explain` summarizing exactly what was changed.
 
 Usage (--xlsx is required -- no default spreadsheet is assumed):
-    python verify_record_website.py 400 --xlsx ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx
-    python verify_record_website.py 4 --xlsx <file> --skip-new-locations   # skip the (default-on) locations crawl
-    python verify_record_website.py 3-10 --xlsx <file>            # a range, inclusive both ends
-    python verify_record_website.py 3 5 8 12-15 --xlsx <file>      # a mix of single ids and ranges
-    python verify_record_website.py 400 --xlsx <file> --apply      # actually write changes to REDCap
+    python automated_comptroller_verifier.py 400 --xlsx ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx
+    python automated_comptroller_verifier.py 4 --xlsx <file> --skip-new-locations   # skip the (default-on) locations crawl
+    python automated_comptroller_verifier.py 3-10 --xlsx <file>            # a range, inclusive both ends
+    python automated_comptroller_verifier.py 3 5 8 12-15 --xlsx <file>      # a mix of single ids and ranges
+    python automated_comptroller_verifier.py 400 --xlsx <file> --apply      # actually write changes to REDCap
 
 Each record ID (in a range or not) gets its own output/<record_id>.txt
 (only under --debug); the whole run also gets one combined output/
@@ -2915,8 +2915,9 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
 def _expand_record_ids(tokens):
     """Each token is a single id ("400"), a range ("3-10", inclusive both
     ends), or a comma-separated run of either ("3,5,8-10") -- so both
-    `verify_record_website.py 3 4 5` and `verify_record_website.py 3-5`
-    (or a mix, `verify_record_website.py 3-5 8 12-15`) work."""
+    `automated_comptroller_verifier.py 3 4 5` and
+    `automated_comptroller_verifier.py 3-5` (or a mix,
+    `automated_comptroller_verifier.py 3-5 8 12-15`) work."""
     ids = []
     for token in tokens:
         for part in str(token).split(","):

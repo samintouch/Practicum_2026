@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Tool file** | `verify_record_website.py` |
+| **Tool file** | `automated_comptroller_verifier.py` |
 | **Applies to** | Comptroller REDCap records |
 | **Audience** | anyone running or reviewing this tool |
 
@@ -125,17 +125,17 @@ Every run needs a record ID (or several) and the spreadsheet to read from.
 **Basic shape:**
 
 ```
-python verify_record_website.py <record id(s)> --xlsx <spreadsheet file>
+python automated_comptroller_verifier.py <record id(s)> --xlsx <spreadsheet file>
 ```
 
 **Common examples:**
 
 | You want to… | Command |
 |---|---|
-| Preview one record | `python verify_record_website.py 400 --xlsx export.xlsx` |
-| Preview a range of records | `python verify_record_website.py 3-50 --xlsx export.xlsx` |
-| Preview a specific mix of records | `python verify_record_website.py 3 5 8 12-15 --xlsx export.xlsx` |
-| Actually write the confirmed changes to REDCap | `python verify_record_website.py 400 --xlsx export.xlsx --apply` |
+| Preview one record | `python automated_comptroller_verifier.py 400 --xlsx export.xlsx` |
+| Preview a range of records | `python automated_comptroller_verifier.py 3-50 --xlsx export.xlsx` |
+| Preview a specific mix of records | `python automated_comptroller_verifier.py 3 5 8 12-15 --xlsx export.xlsx` |
+| Actually write the confirmed changes to REDCap | `python automated_comptroller_verifier.py 400 --xlsx export.xlsx --apply` |
 
 ### Dry run vs. Apply
 
@@ -163,7 +163,7 @@ Answer `y` to continue, or anything else (including just pressing Enter) to canc
 
 ## 6. Command options
 
-Everything you can add after `verify_record_website.py`:
+Everything you can add after `automated_comptroller_verifier.py`:
 
 | Option | Required? | What it does |
 |---|---|---|
