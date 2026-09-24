@@ -1,6 +1,6 @@
 # Automated Comptroller Verification
 
-**Operations Manual:** A guide for understanding, running, and reviewing the REDCap automation tool for existing records.
+**Operations Manual:** A guide for understanding, running, and reviewing the REDCap automation tool for existing records, and for the new location records it can create along the way.
 
 | | |
 |---|---|
@@ -131,7 +131,7 @@ For each record, the application compares the following information with the org
 
 The application can also identify when an organization's website lists additional branch locations beyond the location associated with the current REDCap record. This is common for hospital systems, multi-clinic providers, and organizations with multiple offices.
 
-Any additional locations found are placed in a separate worksheet for manual review before any further action is taken.
+When an additional location has a clear name, a street number, and its own website, and doesn't appear to already exist elsewhere in REDCap, the application creates it as a brand-new REDCap record automatically (only when run with `--apply`; a dry run only previews what would be created). Anything less certain -- missing a name, a street number, or a website, or a likely duplicate of an existing record -- is placed in a separate worksheet for manual review instead, exactly as before. See [New Locations Created Automatically](#new-locations-created-automatically) for details.
 
 ## 8. Limitations and Safety Measures
 
@@ -140,6 +140,8 @@ The following rules are built into the application to help make it safe to use w
 - **It never guesses.** If a website shows more than one possible phone number, fax number, email, or address and it can't tell which belongs to this record, nothing is changed. The record is flagged for manual review instead, and none of that record's other fields are auto-updated either (see [Record Summary Spreadsheet Column Descriptions](#13-record-summary-spreadsheet-column-descriptions) below).
 - **It never automatically changes the Facility/Organization Name.** Even if the application finds a different organization or facility name on the website with high confidence, the name is not updated automatically. A name change requires human review and confirmation.
 - **It never overwrites a recent change made by another user.** Before updating any field, the application checks the current live value in REDCap. If that value has changed since the original spreadsheet was exported, the application skips that field instead of overwriting the newer information.
+- **It never partly updates a record.** Before writing anything, the application checks the live REDCap value of every field it's about to change on that record. If even one no longer matches what the change was based on, nothing for that record is written -- not just the mismatched field. This avoids a record ending up with some fields updated and others silently left stale from the same run.
+- **A new location is only created automatically when the application is confident, and only after checking for duplicates.** A brand-new REDCap record is only created for an additional location found on a website when it has an identifiable name, a street number, and its own website, and the application doesn't find what looks like the same location already tracked elsewhere in REDCap. Anything missing, or anything that looks like a possible duplicate, is left on the Other Locations worksheet for a person to decide instead.
 
 ## 9. Setup Requirements
 
@@ -262,10 +264,34 @@ Processing Record 9999: SKIPPED => ID NOT FOUND (0.0s)
 
 ### Combined Results Workbook
 
-`output/record_summary_redcap_id_<first>_to_<last>_TIME_<timestamp>.xlsx` is a single Excel file with two tabs:
+`output/record_summary_redcap_id_<first>_to_<last>_TIME_<timestamp>.xlsx` is a single Excel file with three tabs:
 
 - **Record Summary** (the tab that opens by default, and the main one to review): one row per record that was actually found in the spreadsheet, summarizing everything the tool found. Covered field-by-field in the next section.
-- **Other Locations**: every extra location an organization's website mentions (another branch, a second clinic, and so on) that isn't this record's own address. These are **never** added to REDCap automatically; a person reviews this tab and decides whether/how to add them as new records.
+- **Other Locations**: every extra location an organization's website mentions that wasn't confident enough to create automatically -- missing a name, street number, or website, or a possible duplicate of a record that already exists elsewhere in REDCap. Each row includes a `reason` column explaining why it landed here instead (always starting with "Failed to add new record:"). These are **never** added to REDCap automatically; a person reviews this tab and decides whether/how to add them.
+- **New Records Added**: one row per brand-new REDCap record the tool actually created (only under `--apply`) for an additional location it was confident about. Includes the new REDCap Record ID, along with the name, address, county, and phone that were written. See [New Locations Created Automatically](#new-locations-created-automatically).
+
+### New Locations Created Automatically
+
+When an additional location is found on an organization's website, the tool decides where it belongs using three checks, in order:
+
+1. **Does it have a name, a street number, and its own website?** If any of those is missing, the location goes to the Other Locations tab instead.
+2. **Does it look like it might already be tracked as its own record elsewhere in REDCap?** The tool checks the rest of the REDCap dataset for an existing record at the same street number with a similar name. If one is found, the location goes to the Other Locations tab instead, noting which existing record it may already be.
+3. **Did REDCap actually accept the new record?** If the write itself fails (a REDCap error, a network problem), the location falls back to the Other Locations tab with the failure reason included -- it is never silently dropped.
+
+Only when a location passes all three checks does the tool create it as a brand-new REDCap record.
+
+A new record is created with:
+
+- Name, street, city, state, ZIP, phone, fax, and website, taken from the location found on the site.
+- **County**, looked up automatically from the address (see below). Left blank if it can't be determined.
+- **"Is this a completed record from Phase 1 data collection?"** set to **No**, since it's a brand-new record, not one from the original data collection.
+- **"Is the organization/facility open or closed?"** set to **Open**, since it was just found live on the organization's own website.
+
+Everything else on the REDCap form (services offered, accreditations, patient limits, and so on) is left blank, the same as any newly-added record, for staff to complete by hand.
+
+Separately, whenever the tool successfully updates one or more fields on an **existing** record, that record's own "Is this a completed record from Phase 1 data collection?" flag is set to **Yes**. Creating (or failing to create) a new record for another location found on that same website has no effect on this flag, or on anything else about the original record's own row in the Record Summary tab.
+
+**County lookup:** the tool looks up each new location's county automatically from its address, using two free public address-lookup services (the U.S. Census Bureau's geocoder first, then OpenStreetMap's Nominatim geocoder if the first doesn't find a match). Neither service covers every address perfectly -- if neither can match it, the county is left blank for a person to fill in by hand. It is never guessed.
 
 ## 13. Record Summary Spreadsheet Column Descriptions
 
@@ -283,9 +309,9 @@ The Record Summary tab is the main file to review. The columns are described bel
 | `name_changed` / `name_old` / `name_new` | `name_changed` is **Yes** if the website appears to display a different facility name. `name_old` is always the name on file; `name_new` only appears when a possible change was detected. This is **never** written to REDCap automatically; it's always left for a person to confirm, since a name change is a business decision. |
 | `notes` | The most important column. See below. |
 | `change_required` | **Yes** if this record needs any action at all, whether automatic or manual. **No** means the tool found nothing worth changing. |
-| `manual_review_required` | **Yes** if a person needs to look at the notes and decide by hand: the website showed more than one possible value for some field, a possible name change, no usable website at all, or (under `--apply`) REDCap itself refused or only partially accepted the write. **No** means everything found was clear enough to act on automatically (or nothing needed changing at all). |
+| `manual_review_required` | **Yes** if a person needs to look at the notes and decide by hand: the website showed more than one possible value for some field, a possible name change, no usable website at all, or (under `--apply`) REDCap itself refused the write or one of this record's own fields no longer matched what the change was based on. **No** means everything found was clear enough to act on automatically (or nothing needed changing at all). This is entirely about this record's own fields -- whether an additional location elsewhere on the same website was successfully created as its own new record (or failed to be) has no effect on this column; check the New Records Added / Other Locations tabs separately for that. |
 | `updated_redcap_record` | **Yes** only if this run actually wrote a change into REDCap for this record. Always **No** during a dry run, always **No** whenever `manual_review_required` is Yes, and still **No** if the REDCap write itself failed (see below). |
-| `found_multiple_locations` | **Yes** if the organization's website lists other branch/office locations besides this one. See the Other Locations tab for the details. These are never added to REDCap automatically. |
+| `found_multiple_locations` | **Yes** if the organization's website lists other branch/office locations besides this one, whether those ended up as brand-new REDCap records or on the Other Locations tab. It doesn't say which happened -- check the New Records Added and Other Locations tabs for the details. |
 
 ### Reading the `notes` column
 
@@ -295,7 +321,7 @@ It always takes one of these forms:
 - **`Updated: …`**: Lists exactly which fields were changed and their before/after values. During a dry run this reads **"Potential Update:"** instead, since nothing was actually written yet.
 - **`Manual Review Required: …`**: The tool found something a person needs to decide: multiple possible phone numbers/fax numbers/emails/addresses on the site, and/or a possible name change. It lists the field(s) involved and, where relevant, the actual candidate values found on the website.
 - **`Manual Review Required: No website address found…`**: The record has no website on file, or the one on file couldn't be reached (broken link, timeout, or an error page even after a retry). Nothing else can be checked for this record until the website field itself is fixed.
-- **`Manual Review Required: Failed to update…`**: Only possible under `--apply`. REDCap either rejected the write entirely (the reason from REDCap is included) or accepted only part of it, with one or more fields skipped, usually because REDCap's current value no longer matched what the change was based on. Either way, `updated_redcap_record` reflects only what was actually written, and this note says exactly what still needs to be applied by hand.
+- **`Manual Review Required: Failed to update…` / `Manual Review Required: Could not update…`**: Only possible under `--apply`. Either REDCap rejected the write entirely (the reason from REDCap is included), or one or more of this record's own fields no longer matched what the change was based on. Either way, `updated_redcap_record` reads **No** and **none** of this record's fields were written -- the tool never writes only part of a record's changes, since that would leave it silently half-updated. This note lists every field that still needs to be applied by hand, and why.
 
 When a record requires manual review for any field, none of that record’s fields are automatically updated. All potential changes for that record are listed in the notes so that a reviewer can confirm and apply the correct changes manually.
 
@@ -307,7 +333,8 @@ Use the following steps to review the Record Summary spreadsheet:
 2. Filter or sort by `change_required` = **Yes** to see only the records with anything to act on.
 3. For any row where `manual_review_required` = **Yes**, read the `notes` column, check the organization's website and REDCap side by side, and update REDCap by hand with the correct value.
 4. For any row where `updated_redcap_record` = **Yes**, REDCap has already been updated automatically for that record. A matching note was also added to that record's Additional Comments in REDCap, so there's a record of exactly what changed and why.
-5. Separately, switch to the "Other Locations" tab for any additional branch/office locations worth adding to REDCap as new records.
+5. Separately, switch to the "New Records Added" tab to see which additional locations were already created as brand-new REDCap records during this run. These are already live in REDCap; the row is just an audit trail of what was created, and where its county came from. Spot-check a few, and fill in the remaining REDCap fields (services, accreditation, and so on) by hand as usual for a new record.
+6. Switch to the "Other Locations" tab for any additional branch/office locations that weren't confident enough to create automatically. Read the `reason` column and decide whether/how to add each one to REDCap by hand.
 
 ## 15. Benefits of the Automation
 
@@ -336,7 +363,9 @@ Automation also has important limitations:
 - An incorrect automation rule could affect many records if the program is not tested carefully.
 - Human review is still required for uncertain or important decisions, including possible facility-name changes.
 - The current tool does not search the internet for a missing organization website.
-- Additional branch locations found by the tool are reported for review but are not automatically added to REDCap.
+- Additional branch locations that meet the tool's criteria (a clear name, street number, website, and no likely duplicate elsewhere in REDCap) are created automatically as new REDCap records; anything less certain is still only reported for manual review.
+- The free address-lookup services used to determine a new location's county don't cover every address; some new records may need their county filled in by hand.
+- A website's contact/location pages sometimes display a different phone number than what's embedded in the page's own listing (for example, call-tracking numbers that can change depending on how the page was reached). The tool prefers the number in the site's own "locations" listing where one exists, but this isn't foolproof for every site.
 
 ## 17. Data Quality and Safety Rules
 
@@ -351,9 +380,11 @@ The following rules are used to protect REDCap data and support accurate review:
 - Do not treat information that is missing from a website as proof that the existing REDCap value is incorrect.
 - Do not automatically change the facility or organization name; possible name changes require human review.
 - If any field in a record requires manual review, the program does not automatically update the other fields in that record during the same run.
-- Before writing a change, the program checks the current live REDCap value. If another user changed the value after the spreadsheet was exported, the program skips that field instead of overwriting the newer information.
+- Before writing a change, the program checks the current live REDCap value. If another user changed the value after the spreadsheet was exported, the program skips writing that field. If this happens for ANY field on a record, none of that record's fields are written -- it's all or nothing, never a partial update.
+- A new location is only created automatically when it has a clear name, street number, and website, and doesn't look like a duplicate of an existing REDCap record. A failed or skipped creation always falls back to the Other Locations worksheet with the reason noted, never silently dropped.
 - Review the Record Summary workbook after each run and keep the results as part of the project documentation.
-- Review additional branch locations separately before deciding whether they should be added as new REDCap records.
+- Review the New Records Added tab after each run to confirm the automatically-created records look correct, and complete their remaining REDCap fields by hand.
+- Review additional branch locations on the Other Locations tab separately before deciding whether they should be added as new REDCap records.
 
 ## 18. Simple Technical Flow
 

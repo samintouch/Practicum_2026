@@ -77,6 +77,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from urllib.parse import urljoin, urlparse
 import openpyxl
 from openpyxl.styles import Alignment
@@ -716,6 +717,40 @@ def _dedupe_subsumed_addresses(addrs):
     return kept
 
 
+# Appended to the STREET group's own pattern in both regexes below so a
+# suite/unit designator (with its own number) counts as part of the
+# street even when nothing but a plain space separates it from what
+# follows -- without this, "3001 Cross Timbers Rd, Suite 120 Flower
+# Mound, TX 75028" (a real other-location page, record 46: no comma
+# between the suite number and the city) parsed as street="120" (just the
+# suite number) instead of the real street, because the permissive regex
+# below found a fully valid match starting AT "120" and never needed to
+# try starting further back at "3001".
+_SUITE_CLAUSE = r"(?:[,\s]+(?:STE|SUITE|UNIT|APT|BLDG|BUILDING|#)\.?\s*[0-9A-Za-z-]+)?"
+# Same designator, as a standalone compiled pattern for STRIPPING a suite/
+# unit clause back out of an already-parsed street (see
+# lookup_county_for_address, which needs the geocoding query itself
+# suite-free even though the full address is still what's written to
+# REDCap).
+_SUITE_CLAUSE_RE = re.compile(r"[,\s]+(?:STE|SUITE|UNIT|APT|BLDG|BUILDING|#)\.?\s*[0-9A-Za-z-]+", re.IGNORECASE)
+
+# Catches a street name (ending in a suffix like St/Street/Ave/Rd/Drive/
+# etc.) that a permissive match swallowed whole into the "city" group,
+# because nothing but a plain space separates it from the real city
+# either (e.g. "990 S Sherman Street Richardson, TX 75081" -- city has no
+# digits to stop the permissive regex's city group at, so it happily
+# absorbs "S Sherman Street Richardson" as one long "city"). Splits that
+# back into street="S Sherman Street" (folded into the real street below)
+# and city="Richardson" whenever the suffix word isn't the very last word
+# of the captured city text.
+_EMBEDDED_STREET_SUFFIX_RE = re.compile(
+    r"^(.*?\b(?:ST|STREET|AVE|AVENUE|BLVD|BOULEVARD|DR|DRIVE|RD|ROAD|LN|LANE|CT|COURT|PKWY|PARKWAY|"
+    r"EXPY|EXPRESSWAY|FWY|FREEWAY|HWY|HIGHWAY|PL|PLACE|CIR|CIRCLE|WAY|TRL|TRAIL|LOOP|SQ|SQUARE)\.?)\s+"
+    r"([A-Za-z .'-]+)$",
+    re.IGNORECASE,
+)
+
+
 def parse_street_city_state_zip(snippet):
     """Sites don't consistently abbreviate the state -- some spell it out
     ("Dallas, Texas 75216") instead of using the 2-letter code the
@@ -725,22 +760,16 @@ def parse_street_city_state_zip(snippet):
     Tries a STRICT pass first: the street/city separator must be a comma or
     an actual newline (from strip_tags turning <br>/block tags into "\\n").
     A plain space there is ambiguous between "still part of the street
-    name" and "start of the city", and when the city's own words are
-    themselves plain letters (e.g. "3242 Remond Drive Dallas, TX 75211"
-    with no delimiter at all before "Dallas"), a permissive regex will
-    happily -- and wrongly -- backtrack into absorbing "Remond Drive
-    Dallas" as the city, leaving "3242" alone as the street.
+    name" and "start of the city".
 
     Only if that strict pass finds nothing do we fall back to a PERMISSIVE
     pass (comma OR space) -- needed for real pages that run the suite
     number straight into the city with no punctuation at all ("120 N.
-    Miller Rd. #300 Mansfield, TX 76063"). That fallback still gets this
-    right in practice because the city group's character class excludes
-    digits/`#`: it can't stretch through "#300", so the street group is
-    forced to keep growing until it's past the suite number, and only THEN
-    does "Mansfield" satisfy the city group -- an accident of the character
-    class, not a delimiter, which is exactly why it's kept as a fallback
-    rather than the primary strategy."""
+    Miller Rd. #300 Mansfield, TX 76063"). Either pass can still leave a
+    street name or suite designator stuck inside the "city" group when a
+    plain space is all that separates it from the real city -- see
+    _SUITE_CLAUSE and _EMBEDDED_STREET_SUFFIX_RE above for the two ways
+    that's caught and corrected below."""
     # The street group's excluded characters include "|" specifically so a
     # footer/nav block crammed onto the same line as the real address (no
     # <br> between them in the source HTML -- so no comma/newline to stop
@@ -753,16 +782,20 @@ def parse_street_city_state_zip(snippet):
     # forces the match to fail at that leading-junk starting position and
     # backtrack to the next digit ("3913"), which is the real address.
     strict = re.search(
-        rf"([0-9][^,\n|]*?)[,\n]+\s*([A-Za-z .]+?),?\s+({_STATE_PATTERN}),?\s+(\d{{5}})",
+        rf"([0-9][^,\n|]*?{_SUITE_CLAUSE})[,\n]+\s*([A-Za-z .]+?),?\s+({_STATE_PATTERN}),?\s+(\d{{5}})",
         snippet, re.IGNORECASE,
     )
     m = strict or re.search(
-        rf"([0-9][^,\n|]*?)[,\s]+([A-Za-z .]+?),?\s+({_STATE_PATTERN}),?\s+(\d{{5}})",
+        rf"([0-9][^,\n|]*?{_SUITE_CLAUSE})[,\s]+([A-Za-z .]+?),?\s+({_STATE_PATTERN}),?\s+(\d{{5}})",
         snippet, re.IGNORECASE,
     )
     if not m:
         return None
     street, city, state, zip_ = m.groups()
+    embedded = _EMBEDDED_STREET_SUFFIX_RE.match(city.strip())
+    if embedded:
+        street = f"{street} {embedded.group(1)}"
+        city = embedded.group(2)
     return {
         "street": street.strip(" ,"),
         "city": city.strip(" ,"),
@@ -848,6 +881,43 @@ def extract_addresses(text):
     # zip_state_plausible's docstring) -- typically leftover template
     # placeholder content, not a real address
     return [r for r in results if zip_state_plausible(r["zip"], r["state"])]
+
+
+_PHONE_TOKEN_RE = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
+
+
+def _phones_by_zip_from_listing(text):
+    """For a "locations" INDEX/grid page where each office is its own
+    short card (address, then that SAME office's own phone number on the
+    very next non-blank line, e.g. "Flower Mound, TX 75028" / "972-350-
+    0225" / "Learn More"), maps each card's zip to its own phone.
+
+    This exists because a location's own individual DETAIL sub-page often
+    can't be trusted for its phone number at all: a real case (record 46,
+    painspinetexas.com) has every detail sub-page embed the SAME sitewide
+    "quick nav" widget with all 5-6 offices' tel: links pooled together,
+    none of them labeled as belonging to any one page, so picking any one
+    of them for "this page's phone" is a guess -- one that was
+    consistently wrong. The index page's own card layout has no such
+    ambiguity: each phone is unambiguously paired with the address
+    directly above it. Returns {zip: phone}."""
+    lines = text.split("\n")
+    city_zip_re = re.compile(rf"([A-Za-z .]+?),?\s+({_STATE_PATTERN}),?\s+(\d{{5}})", re.IGNORECASE)
+    result = {}
+    for i, line in enumerate(lines):
+        m = city_zip_re.search(line)
+        if not m:
+            continue
+        zip_ = m.group(3)
+        for j in range(i + 1, min(i + 3, len(lines))):
+            nxt = lines[j].strip()
+            if not nxt:
+                continue
+            phone_m = _PHONE_TOKEN_RE.fullmatch(nxt)
+            if phone_m:
+                result[zip_] = phone_m.group(0)
+            break
+    return result
 
 
 def confirm_address_without_zip(text, record):
@@ -1003,7 +1073,7 @@ def extract_branch_info(name, block_text, url):
     }
 
 
-def extract_location_info(url, html):
+def extract_location_info(url, html, phone_by_zip=None):
     """Best-effort name/address/phone/fax for ONE location detail page.
     Prefers embedded JSON-LD (exact) and falls back to the same
     text/tel-link extraction used for the main record when there's none.
@@ -1014,7 +1084,14 @@ def extract_location_info(url, html):
     including "location" sub-pages that are clearly about a different
     office (confirmed by their phone numbers, which are page-specific and
     correctly differ). find_other_locations cross-checks this across all
-    crawled pages and substitutes `text_addr` in when it catches that."""
+    crawled pages and substitutes `text_addr` in when it catches that.
+
+    `phone_by_zip` (see _phones_by_zip_from_listing) is an unambiguous
+    per-office phone map built from the site's own "locations" index/grid
+    page, if it has one -- preferred over anything found on THIS detail
+    page whenever nothing here was clearly labeled "phone"/"fax" (see
+    below), since a detail sub-page commonly pools every office's tel:
+    links together with no way to tell which one is its own."""
     jsonld = extract_jsonld_locations(html)
     page_text = strip_tags(html)
     text_found = extract_addresses(page_text)
@@ -1040,7 +1117,13 @@ def extract_location_info(url, html):
     phones = sorted(n for n, lbl in tel_labels.items() if lbl == "phone")
     faxes = sorted(n for n, lbl in tel_labels.items() if lbl == "fax")
     if not phones and not faxes:
-        phones = sorted(n for n, lbl in tel_labels.items() if lbl == "unknown")
+        # Nothing on this page was clearly labeled as either -- rather
+        # than arbitrarily picking one number out of a pooled, unlabeled
+        # "unknown" set (which was consistently the WRONG office's
+        # number in practice), prefer the index page's own unambiguous
+        # per-office phone when one's available for this exact zip.
+        hinted = (phone_by_zip or {}).get(zip_ or "")
+        phones = [hinted] if hinted else sorted(n for n, lbl in tel_labels.items() if lbl == "unknown")
 
     if not street and not phones:
         return None  # nothing usable found on this page at all
@@ -1063,12 +1146,28 @@ def find_other_locations(website, home_html, record):
     to review and add manually, never written anywhere automatically."""
     index_links = find_locations_index_links(home_html, website)
     detail_links = set()
+    phone_by_zip = {}
     for index_url in index_links[:3]:
         index_html, resolved_index_url = _fetch(index_url)
-        if index_html:
-            detail_links.update(find_location_detail_links(index_html, resolved_index_url or index_url))
+        if not index_html:
+            continue
+        detail_links.update(find_location_detail_links(index_html, resolved_index_url or index_url))
+        phone_by_zip.update(_phones_by_zip_from_listing(strip_tags(index_html)))
     if not detail_links:
         return []
+
+    # Some sites only fill in each card's own phone number via JS after
+    # load (a real case: painspinetexas.com's "/location/" grid page has
+    # every card's own phone missing from the plain-fetched HTML
+    # entirely, only appearing once rendered) -- retry with a headless-
+    # browser render specifically to recover this, but only when the
+    # cheap plain fetch came up with nothing at all, and only for the
+    # same index page(s) already fetched above (not every detail page).
+    if not phone_by_zip:
+        for index_url in index_links[:3]:
+            rendered = _fetch_browser(index_url)
+            if rendered:
+                phone_by_zip.update(_phones_by_zip_from_listing(strip_tags(rendered)))
 
     max_crawl = 40
     truncated = len(detail_links) > max_crawl
@@ -1077,7 +1176,7 @@ def find_other_locations(website, home_html, record):
         detail_html, _ = _fetch(url)
         if not detail_html:
             continue
-        info = extract_location_info(url, detail_html)
+        info = extract_location_info(url, detail_html, phone_by_zip)
         if info:
             infos.append(info)
 
@@ -1206,11 +1305,31 @@ REDCAP_FIELD_MAP = {
     "street": "ct2", "city": "ct3", "state": "ct9", "zip": "ct4", "county": "ct10",
     "facebook": "ct16", "instagram": "ct17", "twitter": "ct18",
 }
+# Deliberately kept OUT of REDCAP_FIELD_MAP above -- that map governs
+# auto-writes to an EXISTING record's own fields, and a facility rename is
+# never one of those (see the map's own docstring). A BRAND NEW record
+# obviously needs a name to exist at all, though, so this is a separate
+# constant used only when creating a new record for an "other location"
+# found on a site (confirmed via the same read-only content=metadata call).
+REDCAP_NAME_FIELD = "ct1"
 REDCAP_CHANGE_FLAG_FIELD = "change"
 REDCAP_CHANGE_NOTE_FIELD = "change_explain"          # same narrative note as the field below
 REDCAP_ADDITIONAL_COMMENTS_FIELD = "general_comments"  # labeled "Additional Comments" in REDCap
 REDCAP_VALIDATED_FIELD = "validated"                   # yesno, labeled "Validation"
 REDCAP_VALIDATION_DATE_FIELD = "validation_date"       # date_mdy display, API wants YYYY-MM-DD
+# yesno field, labeled "Is this a completed record from Phase 1 data
+# collection?" -- per the user's request, a brand new record created here
+# was obviously never part of that original data collection (set to "0",
+# No), while successfully updating an EXISTING record's fields marks it
+# as complete (set to "1", Yes). Confirmed via the same read-only
+# content=metadata call as every other field id above.
+REDCAP_PHASE1_COMPLETE_FIELD = "ogcomplete"
+# radio field, labeled "Is the organization/facility open or closed?" --
+# choices are "0, Open | 1, Closed | 2, Unverified ...". A location this
+# tool just found live on the organization's own website is obviously
+# open, so a brand new record is always created as Open.
+REDCAP_ORGSTATUS_FIELD = "orgstatus"
+REDCAP_ORGSTATUS_OPEN = "0"
 
 # human-readable labels for the narrative note (matching the house style
 # from real past examples: "The <label> was updated from X to Y"), NOT the
@@ -1366,6 +1485,35 @@ def redcap_export_record(record_id, fields):
     return rows[0]
 
 
+def redcap_search_records_by_name(search_term, fields):
+    """Read-only: just the given fields, for the (small) set of REDCap
+    records whose own name field contains `search_term` -- filtered
+    SERVER SIDE via REDCap's filterLogic contains() function (confirmed
+    live against this project's own API), so a duplicate check never has
+    to pull the whole project's records, only the handful that could
+    plausibly be a match for one specific location.
+
+    `search_term` is only ever used to narrow candidates -- the real
+    decision is the name_similarity + street-number check done afterward
+    by whoever calls this (see find_live_redcap_duplicate) -- so a quote
+    or backslash that would otherwise break the filterLogic string
+    literal is simply dropped rather than escaped (REDCap's own escaping
+    support for this turned out to be inconsistent in practice)."""
+    literal = re.sub(r"""["'\\]""", "", search_term or "").strip()
+    if not literal:
+        return []
+    config = _load_redcap_config()
+    data = {
+        "token": config["api_token"], "content": "record", "format": "json",
+        "returnFormat": "json", "filterLogic": f'contains([{REDCAP_NAME_FIELD}], "{literal}")',
+    }
+    for i, f in enumerate(fields):
+        data[f"fields[{i}]"] = f
+    resp = requests.post(config["api_url"], data=data, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def redcap_import_record(record_id, field_values):
     """Writes ONLY the fields in field_values (plus the record's own id) --
     REDCap's import API replaces just the fields present in the payload,
@@ -1452,12 +1600,385 @@ def apply_field_changes_to_redcap(record_id, field_changes, needs_review=None):
         payload[REDCAP_VALIDATION_DATE_FIELD] = datetime.date.today().isoformat()
         payload[REDCAP_VALIDATED_FIELD] = "1"
     payload[REDCAP_CHANGE_FLAG_FIELD] = "1"
+    # Reaching here means at least one real field is about to be
+    # successfully written to this EXISTING record (payload was checked
+    # non-empty above) -- per the user's request, that marks it complete
+    # for Phase 1 data collection purposes.
+    payload[REDCAP_PHASE1_COMPLETE_FIELD] = "1"
 
     redcap_import_record(record_id, payload)
     return applied, []
 
 
-OTHER_LOCATIONS_COLUMNS = ["record_id", "name", "street", "city", "state", "zip", "phone", "fax", "url"]
+_NOMINATIM_HEADERS = {"User-Agent": "FacilityVerifyBot/1.0 (REDCap facility-record verification tool)"}
+
+
+def _clean_county_name(name):
+    return re.sub(r"\s+County$", "", name, flags=re.I).strip().upper()
+
+
+def _lookup_county_census(street, city, state, zip_code):
+    """Tier 1: the U.S. Census Bureau's public Geocoding Services API --
+    authoritative government address-range (TIGER/Line) data, but with
+    real gaps: it couldn't match "3001 Cross Timbers Rd" (Flower Mound)
+    or "2118 E State Highway 114" (Southlake) at all, both perfectly
+    valid, real addresses -- apparently because those particular street
+    segments simply aren't in its reference ranges."""
+    params = {
+        "street": street, "city": city or "", "state": state or "",
+        "zip": zip_code or "", "benchmark": "Public_AR_Current",
+        "vintage": "Current_Current", "format": "json",
+    }
+    try:
+        resp = requests.get("https://geocoding.geo.census.gov/geocoder/geographies/address",
+                             params=params, timeout=20)
+        resp.raise_for_status()
+        matches = resp.json()["result"]["addressMatches"]
+        if not matches:
+            return None
+        counties = matches[0]["geographies"].get("Counties") or []
+        return _clean_county_name(counties[0]["NAME"]) if counties else None
+    except Exception:
+        return None
+
+
+def _lookup_county_nominatim(street, city, state, zip_code):
+    """Tier 2 fallback, tried only when Census comes up empty:
+    OpenStreetMap's Nominatim geocoder, which matched both of the real
+    addresses above that Census couldn't. Free, no key, but its usage
+    policy caps casual/free use at roughly 1 request/second -- this is
+    only ever called for the handful of addresses Census couldn't match
+    in one run, so a flat 1s pause here stays well under that."""
+    address = ", ".join(p for p in (street, city, state, zip_code) if p)
+    try:
+        time.sleep(1)
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": address, "format": "jsonv2", "addressdetails": 1, "limit": 1},
+            headers=_NOMINATIM_HEADERS, timeout=20,
+        )
+        resp.raise_for_status()
+        results = resp.json()
+        if not results:
+            return None
+        county = results[0].get("address", {}).get("county")
+        return _clean_county_name(county) if county else None
+    except Exception:
+        return None
+
+
+def lookup_county_for_address(street, city, state, zip_code):
+    """Free, no-key reverse lookup of the county a street address falls
+    in -- used only when creating a brand new REDCap record for an
+    "other location" (see create_redcap_location_record), since that's
+    the one case with no existing on-file county value to just carry
+    forward unchanged the way an existing record's own update already
+    does. Tries the Census geocoder first, then OpenStreetMap's Nominatim
+    if that finds nothing (see the two tier functions above for why
+    neither alone is enough). Returns the plain county name matching this
+    project's existing "organization county" values (e.g. "DENTON" -- no
+    "County" suffix, uppercased), or None if NEITHER service could match
+    the address -- never guessed, and any network/parsing problem in
+    either tier is treated the same as no match rather than raised, since
+    a blank county is far safer than a wrong one for a field a human will
+    double check anyway."""
+    if not street:
+        return None
+    # Both geocoders below return ZERO matches for an otherwise-valid
+    # address with a suite/unit number tacked on (e.g. "3001 Cross
+    # Timbers Rd, Suite 120" matches nothing from either service, while
+    # "3001 Cross Timbers Rd" alone matches cleanly) -- a suite is inside
+    # a building, not a separate geographic point, so it doesn't affect
+    # which COUNTY the building is in anyway. Only the geocoding query
+    # uses the stripped street; the full address (suite included) is
+    # still what's written to REDCap.
+    clean_street = _SUITE_CLAUSE_RE.sub("", street).strip(" ,")
+    return (_lookup_county_census(clean_street, city, state, zip_code)
+            or _lookup_county_nominatim(clean_street, city, state, zip_code))
+
+
+# Every location THIS run has already created, so a second new location
+# later in the same run -- found via a DIFFERENT parent record -- that
+# turns out to be the exact same place is still caught even though a
+# fresh REDCap search (see find_live_redcap_duplicate) would normally be
+# enough on its own. Checked first, with no network call at all.
+_locations_created_this_run = []
+
+
+def _remember_created_location_for_dedup(loc, new_record_id):
+    num = street_number(loc.get("street"))
+    if num:
+        _locations_created_this_run.append((new_record_id, loc.get("effective_name"), num))
+
+
+def find_live_redcap_duplicate(loc, exclude_record_id=None):
+    """Checks REDCap directly for a record that looks like it's already
+    this exact location -- searched by NAME first (server-side, via
+    redcap_search_records_by_name, so this never has to pull the whole
+    project), using the location's own base/cleaned name (before any "-
+    City" disambiguation was added, since an EXISTING record for the same
+    org is likely to have that base name verbatim) -- then confirmed by
+    matching street NUMBER on whatever that search turns up, plus a loose
+    name similarity against the name this location would actually be
+    created with. This is checked right before every create, live, so it
+    reflects anything already in REDCap RIGHT NOW -- including a record
+    this very run already created a moment ago for a different parent
+    (see _locations_created_this_run above), which a one-time snapshot
+    (the xlsx export, or a single bulk fetch at the start of the run)
+    would have no way to know about. Returns (record_id, name) of the
+    match, or None."""
+    candidate_name = loc.get("effective_name") or loc.get("name") or ""
+    num = street_number(loc.get("street"))
+    if not candidate_name or not num:
+        return None
+    exclude = None if exclude_record_id is None else str(exclude_record_id)
+
+    for rid, name, existing_num in _locations_created_this_run:
+        if exclude is not None and str(rid) == exclude:
+            continue
+        if existing_num == num and name_similarity(candidate_name, name or "") >= 0.5:
+            return (rid, name)
+
+    search_term = loc.get("cleaned_name") or candidate_name
+    rows = redcap_search_records_by_name(
+        search_term, ["record_id", REDCAP_NAME_FIELD, REDCAP_FIELD_MAP["street"]])
+    for row in rows:
+        rid = row.get("record_id")
+        if exclude is not None and str(rid) == exclude:
+            continue
+        if street_number(row.get(REDCAP_FIELD_MAP["street"])) != num:
+            continue
+        name = row.get(REDCAP_NAME_FIELD)
+        if name_similarity(candidate_name, name or "") >= 0.5:
+            return (rid, name)
+    return None
+
+
+def create_redcap_location_record(loc, parent_record_id):
+    """Creates a brand new REDCap record for one "other location" found on
+    a site -- name/street/city/state/zip/phone/fax/website plus a
+    best-effort county lookup (see lookup_county_for_address) are set;
+    everything else on the form (services offered, accreditation, patient
+    limits, etc.) is left blank for staff to fill in by hand. Per the
+    user's request, a new record is always marked NOT complete for Phase
+    1 data collection (REDCAP_PHASE1_COMPLETE_FIELD = "0" -- it obviously
+    wasn't part of that original collection) and Open (a location this
+    tool just found live on the organization's own website is, by
+    definition, currently operating). Record numbering is left entirely
+    to REDCap itself (forceAutoNumber) -- this project has record
+    auto-numbering enabled, so the id returned here is whatever REDCap
+    actually assigned, never anything guessed locally.
+
+    `parent_record_id` is the record whose own website this location was
+    found on -- written into Additional Comments so anyone looking at this
+    new record later can trace it back to where it came from and how it
+    got there, the same way a manual entry would note its own source.
+
+    Returns (new_record_id, county) -- county is whatever
+    lookup_county_for_address found, or None."""
+    config = _load_redcap_config()
+    county = lookup_county_for_address(loc.get("street"), loc.get("city"), loc.get("state"), loc.get("zip"))
+    payload = {
+        "record_id": "0",  # placeholder -- forceAutoNumber replaces this
+        REDCAP_NAME_FIELD: loc["effective_name"],
+        REDCAP_FIELD_MAP["street"]: loc.get("street") or "",
+        REDCAP_FIELD_MAP["city"]: loc.get("city") or "",
+        REDCAP_FIELD_MAP["state"]: loc.get("state") or "",
+        REDCAP_FIELD_MAP["zip"]: loc.get("zip") or "",
+        REDCAP_FIELD_MAP["phone"]: loc.get("phone") or "",
+        REDCAP_FIELD_MAP["fax"]: loc.get("fax") or "",
+        REDCAP_FIELD_MAP["website"]: loc.get("url") or "",
+        REDCAP_PHASE1_COMPLETE_FIELD: "0",
+        REDCAP_ORGSTATUS_FIELD: REDCAP_ORGSTATUS_OPEN,
+        REDCAP_ADDITIONAL_COMMENTS_FIELD: (
+            "This record was added using the Automated_Comptroller_Verification script after being "
+            f"identified as an additional location associated with REDCap Record ID: {parent_record_id}"
+        ),
+    }
+    if county:
+        payload[REDCAP_FIELD_MAP["county"]] = county
+    data = {
+        "token": config["api_token"], "content": "record", "format": "json",
+        "returnFormat": "json", "action": "import", "overwriteBehavior": "normal",
+        "forceAutoNumber": "true", "returnContent": "ids",
+        "data": json.dumps([payload]),
+    }
+    resp = requests.post(config["api_url"], data=data, timeout=30)
+    resp.raise_for_status()
+    result = resp.json()
+    if isinstance(result, dict) and result.get("error"):
+        raise RuntimeError(result["error"])
+    new_id = result[0] if isinstance(result, list) and result else None
+    if not new_id:
+        raise RuntimeError(f"REDCap did not return a new record id -- response: {result}")
+    return new_id, county
+
+
+def _clean_location_name(name):
+    """Strips trademark marks and any city/state tag a site baked directly
+    into a location's name -- e.g. "Carrollton Springs Changes® | Frisco,
+    TX" becomes "Carrollton Springs Changes". Any city needed to
+    disambiguate two same-named locations is added back deliberately, in
+    ONE controlled "<name> - <City>" format, by
+    _assign_effective_location_names below -- never whatever the site
+    itself happened to tack on (a pipe-separated nav crumb, a trailing
+    ", City, ST", etc.)."""
+    if not name:
+        return name
+    # Sites are inconsistent about which dash character they use in a
+    # name (an en dash "–", em dash "—", minus sign "−",
+    # etc.), and comparing/searching on the raw text downstream (REDCap's
+    # own filterLogic contains(), used by find_live_redcap_duplicate, is
+    # an exact-character substring match -- not the fuzzy name_similarity
+    # used elsewhere) would silently miss a name that's identical except
+    # for the dash character. A real case: "HABILITATIVE HOMES –
+    # RESIDENTIAL PROGRAM" (en dash, exactly as the site renders it) got
+    # created as a new REDCap record three separate times, because each
+    # run's duplicate search used whatever dash the site happened to
+    # render that day, which never matched the plain-hyphen version
+    # already sitting in REDCap from an earlier run. Normalized to a
+    # plain "-" here, once, up front -- so every use of this name from
+    # here on (the search term AND the value actually written to REDCap)
+    # is consistent regardless of what the site itself uses.
+    cleaned = re.sub(r"[‐-―−]", "-", name)
+    cleaned = re.sub(r"[®™©]", "", cleaned)
+    cleaned = re.sub(r"\(\s*[Rr]\s*\)", "", cleaned)
+    cleaned = re.sub(r"\(\s*[Tt][Mm]\s*\)", "", cleaned)
+    # a trailing "<sep> City, ST" tail -- city is letters/spaces/periods/
+    # hyphens/apostrophes, state is a two-letter abbreviation
+    cleaned = re.sub(r"\s*[|,\-]\s*[A-Za-z .'\-]+,\s*[A-Z]{2}\s*$", "", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip(" |-,")
+
+
+def _assign_effective_location_names(locations):
+    """A site's own "locations" listing often just repeats ONE org-wide
+    name for every branch it lists, with no distinct per-branch name at
+    all -- when that's the case here (the same CLEANED name shows up on
+    2+ of this record's OTHER locations), that name alone can't identify
+    any ONE of them as its own new REDCap record, so each gets
+    disambiguated as "<name> - <City>" (e.g. a record whose site lists
+    "Texoma Care Primary and Specialty Physicians" for several different
+    addresses becomes "Texoma Care Primary and Specialty Physicians -
+    Sherman", "... - Denison", etc.). A name that's unique among this
+    batch is left alone, since it's presumably already that branch's own
+    distinct name (e.g. "Texoma Urgent Care" vs. "Texoma Family
+    Practice")."""
+    cleaned_names = {id(loc): _clean_location_name(loc.get("name")) for loc in locations}
+    name_counts = Counter((n or "").strip().lower() for n in cleaned_names.values() if n)
+    result = []
+    for loc in locations:
+        name = (cleaned_names[id(loc)] or "").strip()
+        if name and name_counts[name.lower()] > 1 and loc.get("city"):
+            effective_name = f"{name} - {loc['city']}"
+        else:
+            effective_name = name
+        # kept alongside effective_name (which may have "- City" tacked on)
+        # so a later live-REDCap duplicate search (see
+        # find_live_redcap_duplicate) can search on the base org name --
+        # what an EXISTING record for the same org is actually likely to
+        # have, verbatim -- rather than our own added city qualifier.
+        result.append({**loc, "effective_name": effective_name, "cleaned_name": name})
+    return result
+
+
+# Matched as whole words against a location's name -- a real case: a
+# branch-list entry like "3H YOUTH RANCH - RESIDENTIAL PROGRAM" was
+# immediately followed by its own "PERMANENTLY CLOSED" status line, which
+# the name-block parsing (split_into_branch_blocks) folds into that same
+# branch's name rather than treating it as a separate block. There's no
+# reason to auto-create a REDCap record for a location the site itself
+# says no longer operates.
+_CLOSED_NAME_RE = re.compile(r"\bPERMANENTLY\b|\bCLOSED\b", re.IGNORECASE)
+
+
+def _location_creation_eligible(loc):
+    """A location only becomes its own new REDCap record when we're sure
+    enough about it: an identifiable name, a street NUMBER (not just a
+    city/zip), its own website, and a name that doesn't itself say the
+    location is closed -- per the user's explicit criteria. Anything less
+    falls back to a row on the Other Locations tab instead, same as
+    before this feature existed."""
+    name_text = f"{loc.get('name') or ''} {loc.get('effective_name') or ''}"
+    return (bool(loc.get("effective_name")) and bool(street_number(loc.get("street")))
+            and bool(loc.get("url")) and not _CLOSED_NAME_RE.search(name_text))
+
+
+def _location_ineligible_reason(loc):
+    name_text = f"{loc.get('name') or ''} {loc.get('effective_name') or ''}"
+    if _CLOSED_NAME_RE.search(name_text):
+        return "Failed to add new record: name indicates this location is closed"
+    missing = []
+    if not loc.get("effective_name"):
+        missing.append("name")
+    if not street_number(loc.get("street")):
+        missing.append("street address/number")
+    if not loc.get("url"):
+        missing.append("website")
+    return "Failed to add new record: missing " + " and ".join(missing)
+
+
+_existing_locations_index_cache = {}
+
+
+def _existing_redcap_locations_index(xlsx_path):
+    """Every (street number) -> [(record id, name), ...] already on file
+    in the whole xlsx export, built once per file and cached. Used only to
+    check that a new-location candidate isn't actually an already-tracked
+    facility under a different record id before creating a brand new
+    REDCap record for it -- this project's whole purpose is de-duplicating
+    facility records, so a location otherwise confident enough to create
+    still gets one more check against the rest of the dataset first."""
+    if xlsx_path in _existing_locations_index_cache:
+        return _existing_locations_index_cache[xlsx_path]
+    df = _load_xlsx(xlsx_path)
+
+    def col(substr, exclude=()):
+        for c in df.columns:
+            lc = c.lower()
+            if substr in lc and not any(e in lc for e in exclude):
+                return c
+        return None
+
+    name_col, street_col = col("organization/facility name"), col("organization street name")
+    index = {}
+    if name_col and street_col:
+        for _, row in df.iterrows():
+            num = street_number(row.get(street_col))
+            if num:
+                index.setdefault(num, []).append((row.get("Record ID"), row.get(name_col)))
+    _existing_locations_index_cache[xlsx_path] = index
+    return index
+
+
+def _find_existing_duplicate_record(loc, xlsx_path, exclude_record_id):
+    """Returns (record_id, name) of an existing REDCap record that looks
+    like it's already this same location -- matched on an exact street
+    NUMBER plus a loose name similarity (an exact street-number match with
+    a wildly different name is presumably a different business that
+    happens to share a building, not a duplicate) -- or None."""
+    num = street_number(loc.get("street"))
+    if not num:
+        return None
+    candidate_name = loc.get("effective_name") or loc.get("name") or ""
+    for rid, name in _existing_redcap_locations_index(xlsx_path).get(num, []):
+        if rid == exclude_record_id:
+            continue
+        if name_similarity(candidate_name, name or "") >= 0.5:
+            return (rid, name)
+    return None
+
+
+OTHER_LOCATIONS_COLUMNS = ["record_id", "name", "street", "city", "state", "zip", "phone", "fax", "url", "reason"]
+
+# One row per brand new REDCap record actually created for an "other
+# location" (see create_redcap_location_record) -- kept on its own tab,
+# separate from Other Locations (which is only ever locations that did
+# NOT get auto-created: disqualified, a likely duplicate, or a failed
+# create attempt), so a reviewer can tell at a glance what's new in
+# REDCap versus what still needs a human to add by hand.
+CREATED_LOCATIONS_COLUMNS = [
+    "record_id", "new_record_id", "name", "street", "city", "state", "zip", "county", "phone", "fax", "url",
+]
 
 
 SUMMARY_COLUMNS = [
@@ -1530,6 +2051,14 @@ def build_summary_row(record_id, result, record, updated_redcap=False, dry_run=F
     needs to notice and retry/investigate, not something that should
     quietly look like nothing happened.
 
+    Creating new REDCap records for "other locations" found on this
+    record's own website (see create_redcap_location_record) is entirely
+    separate from this record's own manual_review_required/notes: whether
+    those creations succeed or fail has no bearing on whether THIS record
+    needs review, since they're different REDCap records altogether. A
+    failed creation is reported only on the Other Locations tab (with its
+    own reason column), never here.
+
     `record` is the same on-file dict verify() itself worked from (as
     returned by load_record) -- its own website/phone/fax/email/address/
     name values are what the *_old columns always show, REGARDLESS of
@@ -1546,7 +2075,7 @@ def build_summary_row(record_id, result, record, updated_redcap=False, dry_run=F
     needs_review_details = result["needs_review_details"]
     name_changed = result["name_changed"]
     other_locations = result["other_locations"]
-    found_multiple_locations = bool(other_locations)
+    found_multiple_locations = bool(other_locations) or bool(result.get("new_location_candidates"))
     # Set only by verify()'s two early-return paths -- no website on file
     # at all, or the one on file couldn't be reached/rendered (fetch
     # failure, timeout, error/challenge page even after a browser-render
@@ -1686,11 +2215,14 @@ def build_summary_row(record_id, result, record, updated_redcap=False, dry_run=F
     }
 
 
-def write_run_workbook(path, summary_rows, other_location_rows):
+def write_run_workbook(path, summary_rows, other_location_rows, created_location_rows=None):
     """One .xlsx per run (replacing the two separate CSVs this used to be)
     -- "Record Summary" as the first/active tab (the main one to review,
     columns per SUMMARY_COLUMNS), "Other Locations" as the second
-    (OTHER_LOCATIONS_COLUMNS). Always overwrites `path` outright rather
+    (OTHER_LOCATIONS_COLUMNS, locations NOT auto-created -- disqualified, a
+    likely duplicate, or a failed create attempt), and "New Records Added"
+    as the third (CREATED_LOCATIONS_COLUMNS, one row per brand new REDCap
+    record this run actually created). Always overwrites `path` outright rather
     than appending -- each run already gets its own uniquely timestamped
     filename (see main()), so there's nothing to accumulate into across
     runs the way the old CSV-based other-locations file used to.
@@ -1727,6 +2259,12 @@ def write_run_workbook(path, summary_rows, other_location_rows):
         ws_other.append([row.get(col, "") for col in OTHER_LOCATIONS_COLUMNS])
     ws_other.freeze_panes = "A2"
 
+    ws_created = wb.create_sheet("New Records Added")
+    ws_created.append(CREATED_LOCATIONS_COLUMNS)
+    for row in (created_location_rows or []):
+        ws_created.append([row.get(col, "") for col in CREATED_LOCATIONS_COLUMNS])
+    ws_created.freeze_panes = "A2"
+
     wb.save(path)
 
 
@@ -1737,7 +2275,7 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
     print(f"Website on file: {website}\n")
     if not website:
         print("No website on file for this record -- nothing to verify against.")
-        return {"record_id": record_id, "field_changes": [], "other_locations": [],
+        return {"record_id": record_id, "field_changes": [], "other_locations": [], "new_location_candidates": [],
                 "needs_review": [], "needs_review_details": {}, "name_changed": False, "name_old": None, "name_new": None,
                 "website_invalid": True}
 
@@ -1783,7 +2321,7 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
               "shows an error, even after a browser render. The record's website field likely "
               "needs updating; skipping the rest of this check since nothing reliable can be "
               "verified against a page that isn't really there.")
-        return {"record_id": record_id, "field_changes": [], "other_locations": [],
+        return {"record_id": record_id, "field_changes": [], "other_locations": [], "new_location_candidates": [],
                 "needs_review": [], "needs_review_details": {}, "name_changed": False, "name_old": None, "name_new": None,
                 "website_invalid": True}
 
@@ -2083,21 +2621,54 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
     # notice and discard later.
     deduped_locations = [loc for loc in deduped_locations if str(loc.get("state") or "").strip().upper() == "TX"]
 
+    # Per the user's request: a location we're sure enough about --an
+    # identifiable name, a street NUMBER, and its own website-- becomes a
+    # brand new REDCap record instead of just a row on the Other Locations
+    # tab for a human to type in by hand. Names get disambiguated first
+    # (see _assign_effective_location_names) since a site often reuses one
+    # org-wide name across every branch it lists. Anything not eligible,
+    # OR that looks like it might already be tracked as its own record
+    # elsewhere in REDCap (matched by street number + name similarity --
+    # this project's whole purpose is de-duplication), still falls back to
+    # the Other Locations tab exactly like before, now with a reason
+    # column explaining why it landed there instead of being created.
+    deduped_locations = _assign_effective_location_names(deduped_locations)
+    new_location_candidates, other_locations_for_tab = [], []
+    for loc in deduped_locations:
+        if not _location_creation_eligible(loc):
+            other_locations_for_tab.append({**loc, "reason": _location_ineligible_reason(loc)})
+            continue
+        dup = _find_existing_duplicate_record(loc, xlsx_path, record_id)
+        if dup:
+            other_locations_for_tab.append(
+                {**loc, "reason": f"Failed to add new record: possible duplicate of existing REDCap record "
+                                   f"{dup[0]} ({dup[1]})"})
+            continue
+        new_location_candidates.append(loc)
+
     # like every other section, only shown unconditionally when there's
     # something real to report -- the "nothing found"/"pass --locations"
     # hints are diagnostic, not actionable, so they're --debug-only
-    if deduped_locations or debug:
+    total_found = len(new_location_candidates) + len(other_locations_for_tab)
+    if total_found or debug:
         print("\n--- Other locations on this site ---")
-        if deduped_locations:
-            print(f"  Found {len(deduped_locations)} other location(s) besides this record's own:")
-            for loc in deduped_locations:
+        if new_location_candidates:
+            print(f"  {len(new_location_candidates)} other location(s) have enough info (name, street number, "
+                  f"website) to become their own new REDCap record:")
+            for loc in new_location_candidates:
+                addr = f"{loc['street']}, {loc['city']}, {loc['state']} {loc['zip']}"
+                print(f"    {loc['effective_name']} -- {addr} -- phone {loc['phone'] or '?'} -- {loc['url']}")
+        if other_locations_for_tab:
+            print(f"  {len(other_locations_for_tab)} other location(s) going to the Other Locations tab instead:")
+            for loc in other_locations_for_tab:
                 addr = f"{loc['street']}, {loc['city']}, {loc['state']} {loc['zip']}" if loc["street"] else "(no address found)"
-                print(f"    {loc['name'] or '(name unknown)'} -- {addr} -- phone {loc['phone'] or '?'} -- {loc['url']}")
-            print("  (written to the consolidated multi-location spreadsheet, tagged with this record id)")
-        elif skip_hint:
-            print(skip_hint)
-        elif check_other_locations:
-            print("  (no separate \"locations\" index found on this site, or nothing new besides this record)")
+                print(f"    {loc['name'] or '(name unknown)'} -- {addr} -- phone {loc['phone'] or '?'} -- "
+                      f"{loc['url']} -- {loc['reason']}")
+        if not total_found:
+            if skip_hint:
+                print(skip_hint)
+            elif check_other_locations:
+                print("  (no separate \"locations\" index found on this site, or nothing new besides this record)")
 
     best_name_match = None
     if site_names:
@@ -2333,7 +2904,8 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
         ]
     name_changed = bool(best_name_match and best_name_match[1] < 0.5)
 
-    return {"record_id": record_id, "field_changes": field_changes, "other_locations": deduped_locations,
+    return {"record_id": record_id, "field_changes": field_changes, "other_locations": other_locations_for_tab,
+            "new_location_candidates": new_location_candidates,
             "needs_review": needs_review, "needs_review_details": needs_review_details, "name_changed": name_changed,
             "name_old": record["name"] if name_changed else None,
             "name_new": best_name_match[0] if name_changed else None,
@@ -2397,13 +2969,15 @@ def main():
                          help="path to the single .xlsx workbook this run writes (default: "
                               "<outdir>/record_summary_redcap_id_<lo>_to_<hi>_TIME_<timestamp>.xlsx, "
                               "named after the id range and the exact time this run happened). "
-                              "Contains two tabs: \"Record Summary\" (one row per valid record id, "
-                              "see the field-by-field docs) and \"Other Locations\" (every additional "
-                              "branch/office location an organization's website mentions, each row "
-                              "tagged with the record_id it came from) -- the Other Locations tab is "
-                              "NEVER written to REDCap automatically, since an ambiguous or additional "
-                              "location can't be reconciled to one existing record without a human "
-                              "deciding.")
+                              "Contains three tabs: \"Record Summary\" (one row per valid record id, "
+                              "see the field-by-field docs), \"Other Locations\" (every additional "
+                              "branch/office location an organization's website mentions that was NOT "
+                              "auto-created -- missing a name/street number/website, a likely duplicate "
+                              "of an existing record, or a failed create attempt -- each row tagged with "
+                              "the record_id it came from and never written to REDCap automatically), and "
+                              "\"New Records Added\" (one row per brand new REDCap record this run "
+                              "actually created for a confidently-identified other location, only under "
+                              "--apply).")
     args = parser.parse_args()
 
     # Printed FIRST, before the dry-run/--apply notices below -- so the
@@ -2467,14 +3041,15 @@ def main():
     run_workbook_path = args.output_xlsx or os.path.join(
         args.outdir, f"record_summary_redcap_id_{id_range_suffix}_TIME_{run_timestamp}{dry_run_suffix}.xlsx")
     all_other_location_rows = []
+    all_created_location_rows = []
     summary_rows = []
     saved_report_count = 0
 
     # Right-justify the id to a fixed 4-character width (this dataset's ids
-    # run up to 4 digits) so "Processing Record" lines line up in a column
+    # run up to 5 digits) so "Processing Record" lines line up in a column
     # regardless of how many digits any one id has -- a 5+ digit id just
     # widens its own line instead of breaking alignment for the rest.
-    id_width = 4
+    id_width = 5
     run_start = time.time()
 
     for record_id in record_ids:
@@ -2500,6 +3075,8 @@ def main():
         applied_to_redcap = False
         redcap_apply_error = None
         redcap_skipped = []
+        created_locations = []
+        location_creation_errors = []
         token_auth_failure = None
         try:
             with contextlib.redirect_stdout(sink):
@@ -2515,6 +3092,72 @@ def main():
                 if result:
                     for loc in result["other_locations"]:
                         all_other_location_rows.append({"record_id": record_id, **loc})
+
+                    new_location_candidates = result.get("new_location_candidates", [])
+                    if new_location_candidates and not args.apply:
+                        print("\n--- New REDCap record(s) that would be created for other locations "
+                              "(dry-run -- pass --apply to create them) ---")
+                        for loc in new_location_candidates:
+                            addr = f"{loc['street']}, {loc['city']}, {loc['state']} {loc['zip']}"
+                            print(f"  {loc['effective_name']} -- {addr} -- phone {loc['phone'] or '?'} -- {loc['url']}")
+                    elif new_location_candidates:
+                        print("\n--- Creating new REDCap record(s) for other locations ---")
+                        for loc in new_location_candidates:
+                            # Re-checked against LIVE REDCap right before writing,
+                            # on the same name (after cleanup/"- City" disambiguation)
+                            # and address the record is actually about to be created
+                            # with -- the xlsx-based check in verify() only sees a
+                            # possibly-stale snapshot, and has no way to know about a
+                            # record THIS run already created a moment ago for a
+                            # different parent. Never guessed: if the live check
+                            # itself can't be confirmed, this location is NOT created
+                            # -- it falls back to Other Locations instead of risking
+                            # a duplicate.
+                            try:
+                                live_dup = find_live_redcap_duplicate(loc, record_id)
+                            except Exception as e:
+                                print(f"  FAILED to confirm {loc['effective_name']} isn't already in "
+                                      f"REDCap -- {e}")
+                                all_other_location_rows.append({
+                                    "record_id": record_id, **loc,
+                                    "reason": f"Failed to add new record: could not confirm this "
+                                              f"location isn't already in REDCap -- {e}",
+                                })
+                                continue
+                            if live_dup:
+                                dup_id, dup_name = live_dup
+                                print(f"  SKIPPED creating record for {loc['effective_name']} -- already "
+                                      f"exists as REDCap record {dup_id} ({dup_name})")
+                                all_other_location_rows.append({
+                                    "record_id": record_id, **loc,
+                                    "reason": f"Failed to add new record: record already exists in REDCap "
+                                              f"as record {dup_id} ({dup_name})",
+                                })
+                                continue
+                            try:
+                                new_id, county = create_redcap_location_record(loc, record_id)
+                            except Exception as e:
+                                # never silently dropped -- falls back to the
+                                # Other Locations tab, same as any other
+                                # ineligible location, with the failure as
+                                # its reason
+                                location_creation_errors.append({**loc, "error": str(e)})
+                                print(f"  FAILED to create record for {loc['effective_name']} -- {e}")
+                                all_other_location_rows.append({
+                                    "record_id": record_id, **loc,
+                                    "reason": f"Failed to add new record: {e}",
+                                })
+                            else:
+                                _remember_created_location_for_dedup(loc, new_id)
+                                created_locations.append({**loc, "new_record_id": new_id, "county": county})
+                                all_created_location_rows.append({
+                                    "record_id": record_id, "new_record_id": new_id,
+                                    "name": loc["effective_name"], "street": loc.get("street"),
+                                    "city": loc.get("city"), "state": loc.get("state"), "zip": loc.get("zip"),
+                                    "county": county, "phone": loc.get("phone"), "fax": loc.get("fax"),
+                                    "url": loc.get("url"),
+                                })
+                                print(f"  Created record {new_id}: {loc['effective_name']} -- {loc['url']}")
 
                     field_changes = result["field_changes"]
                     needs_review = result["needs_review"]
@@ -2596,11 +3239,20 @@ def main():
             break
 
     if summary_rows:
-        write_run_workbook(run_workbook_path, summary_rows, all_other_location_rows)
-        print(f"\n{len(summary_rows)} record summary row(s) and {len(all_other_location_rows)} "
-              f"other-location row(s) written to {run_workbook_path} "
-              f"(\"Record Summary\" / \"Other Locations\" tabs -- Other Locations rows are "
-              f"never sent to REDCap, review/add manually)")
+        write_run_workbook(run_workbook_path, summary_rows, all_other_location_rows, all_created_location_rows)
+        # A short, at-a-glance recap instead of raw row counts per tab --
+        # these four numbers are what someone skimming the console after a
+        # run actually wants to know. They're independent counts, not a
+        # partition of summary_rows (e.g. a dry-run's proposed-but-not-
+        # yet-applied change falls into neither "updated" nor "unchanged").
+        updated_count = sum(1 for r in summary_rows if r["updated_redcap_record"] == "Yes")
+        unchanged_count = sum(1 for r in summary_rows if r["notes"] == "Record up to date: No Change Required")
+        manual_review_count = sum(1 for r in summary_rows if r["manual_review_required"] == "Yes")
+        new_location_count = len(all_created_location_rows)
+        print(f"\n{updated_count} record(s) updated in REDCap, \n{unchanged_count} record(s) unchanged, "
+              f"\n{manual_review_count} record(s) need manual review, and \n{new_location_count} new "
+              f"location(s) added to REDCap.")
+        print(f"Full details written to {run_workbook_path}")
 
     if args.debug and saved_report_count:
         print(f"Saved {saved_report_count} detailed report(s) to {args.outdir}/<record_id>.txt")
