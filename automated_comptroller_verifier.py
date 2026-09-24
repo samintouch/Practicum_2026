@@ -1841,16 +1841,36 @@ def _clean_location_name(name):
     # here on (the search term AND the value actually written to REDCap)
     # is consistent regardless of what the site itself uses.
     cleaned = re.sub(r"[‐-―−]", "-", name)
+    # A "|" in a scraped name is reliably a nav/branding separator, never
+    # part of the real facility name -- the same assumption already used
+    # for street-address junk (see extract_addresses). A page's <title>
+    # or og:site_name meta tag, used here as a fallback when there's no
+    # JSON-LD, commonly reads like "Geode Health | Mental Health Care
+    # Focused On You" (brand + marketing tagline) or "Some Clinic |
+    # Sitemap | Privacy" -- only the FIRST segment is ever the real name.
+    cleaned = cleaned.split("|", 1)[0]
     cleaned = re.sub(r"[®™©]", "", cleaned)
     cleaned = re.sub(r"\(\s*[Rr]\s*\)", "", cleaned)
     cleaned = re.sub(r"\(\s*[Tt][Mm]\s*\)", "", cleaned)
     # a trailing "<sep> City, ST" tail -- city is letters/spaces/periods/
     # hyphens/apostrophes, state is a two-letter abbreviation
-    cleaned = re.sub(r"\s*[|,\-]\s*[A-Za-z .'\-]+,\s*[A-Z]{2}\s*$", "", cleaned)
+    cleaned = re.sub(r"\s*[,\-]\s*[A-Za-z .'\-]+,\s*[A-Z]{2}\s*$", "", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip(" |-,")
 
 
-def _assign_effective_location_names(locations):
+def _first_street_word(street):
+    """The first real word of a street address, skipping the leading
+    house NUMBER (e.g. "Alameda" from "8720 Alameda Ave Ste B") -- used
+    only as a last-resort disambiguator, in _assign_effective_location_names
+    below, between two fallback-named locations that share the same
+    city too."""
+    if not street:
+        return None
+    words = re.sub(r"^\d+\s*", "", street).split()
+    return words[0] if words else None
+
+
+def _assign_effective_location_names(locations, parent_name=None):
     """A site's own "locations" listing often just repeats ONE org-wide
     name for every branch it lists, with no distinct per-branch name at
     all -- when that's the case here (the same CLEANED name shows up on
@@ -1862,13 +1882,36 @@ def _assign_effective_location_names(locations):
     Sherman", "... - Denison", etc.). A name that's unique among this
     batch is left alone, since it's presumably already that branch's own
     distinct name (e.g. "Texoma Urgent Care" vs. "Texoma Family
-    Practice")."""
+    Practice").
+
+    When a location has NO usable name at all (nothing left after
+    cleanup), a fallback is built instead of leaving it blank: "<parent
+    record's own name> - <City>" (e.g. a location found on Healthy
+    Horizons Clinic's own site, with no name of its own, in El Paso
+    becomes "HEALTHY HORIZON CLINICS - El Paso"). If that's still not
+    enough to tell apart two DIFFERENT unnamed locations in the SAME
+    city, the first word of the street name is appended too (e.g. "...
+    - El Paso - Alameda" for "8720 Alameda Ave Ste B"). This fallback
+    only ever applies to a location with no name to begin with -- one
+    with an ambiguous but genuine name is still handled the way above."""
     cleaned_names = {id(loc): _clean_location_name(loc.get("name")) for loc in locations}
     name_counts = Counter((n or "").strip().lower() for n in cleaned_names.values() if n)
+
+    fallback_city_counts = Counter()
+    for loc in locations:
+        if not (cleaned_names[id(loc)] or "").strip() and parent_name and loc.get("city"):
+            fallback_city_counts[loc["city"].strip().lower()] += 1
+
     result = []
     for loc in locations:
         name = (cleaned_names[id(loc)] or "").strip()
-        if name and name_counts[name.lower()] > 1 and loc.get("city"):
+        if not name and parent_name and loc.get("city"):
+            effective_name = f"{parent_name} - {loc['city']}"
+            if fallback_city_counts[loc["city"].strip().lower()] > 1:
+                first_word = _first_street_word(loc.get("street"))
+                if first_word:
+                    effective_name = f"{effective_name} - {first_word}"
+        elif name and name_counts[name.lower()] > 1 and loc.get("city"):
             effective_name = f"{name} - {loc['city']}"
         else:
             effective_name = name
@@ -1879,6 +1922,42 @@ def _assign_effective_location_names(locations):
         # have, verbatim -- rather than our own added city qualifier.
         result.append({**loc, "effective_name": effective_name, "cleaned_name": name})
     return result
+
+
+def _street_name_without_number(street):
+    """The rest of a street string after stripping its leading house
+    number -- e.g. "Broaddus Ave" from "3913 Broaddus Ave". Used only by
+    _drop_same_name_street_collisions below to compare two addresses'
+    street NAMES loosely, independent of their house numbers."""
+    if not street:
+        return ""
+    return re.sub(r"^\s*\d+\s*", "", street).strip()
+
+
+def _drop_same_name_street_collisions(locations):
+    """Per the user's request: when two locations end up with the exact
+    same effective_name AND the same street NAME (only their house
+    NUMBER differs -- e.g. "3905 Broaddus Avenue" and "3913 Broaddus
+    Ave" both landing on the same fallback name "... - El Paso -
+    Broaddus", since the fallback in _assign_effective_location_names
+    only disambiguates by city + the street's first word), only the
+    FIRST one found is kept; the rest are dropped entirely -- never
+    created, and never even reported on the Other Locations tab -- so
+    two genuinely different addresses don't end up sharing one
+    confusing, identical name."""
+    kept = []
+    for loc in locations:
+        name_key = (loc.get("effective_name") or "").strip().lower()
+        street_key = _normalize_street_for_compare(_street_name_without_number(loc.get("street")))
+        collides = bool(name_key) and bool(street_key) and any(
+            (k.get("effective_name") or "").strip().lower() == name_key
+            and _normalize_street_for_compare(_street_name_without_number(k.get("street"))) == street_key
+            for k in kept
+        )
+        if collides:
+            continue
+        kept.append(loc)
+    return kept
 
 
 # Matched as whole words against a location's name -- a real case: a
@@ -2632,7 +2711,8 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
     # this project's whole purpose is de-duplication), still falls back to
     # the Other Locations tab exactly like before, now with a reason
     # column explaining why it landed there instead of being created.
-    deduped_locations = _assign_effective_location_names(deduped_locations)
+    deduped_locations = _assign_effective_location_names(deduped_locations, _on_file_display(record.get("name")) or None)
+    deduped_locations = _drop_same_name_street_collisions(deduped_locations)
     new_location_candidates, other_locations_for_tab = [], []
     for loc in deduped_locations:
         if not _location_creation_eligible(loc):
