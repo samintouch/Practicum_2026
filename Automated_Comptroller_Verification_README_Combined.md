@@ -198,18 +198,12 @@ The following setup is required before the tool can run.
 
 ### 9.1 Python and Required Packages
 
-You need **Python 3.9 or later** installed.
+You need **Python 3.11 or later** installed. If Python isn't already installed, you can download the latest installer from [https://www.python.org/downloads/](https://www.python.org/downloads/).
 
 Install the required packages with:
 
 ```
-pip install pandas requests openpyxl
-```
-
-`playwright` is optional, used only for a small number of JavaScript-heavy sites. If you want that support, also run:
-
-```
-pip install playwright
+pip install pandas requests openpyxl playwright
 playwright install chromium
 ```
 
@@ -217,11 +211,11 @@ Ask your technical contact to set this up once if it isn't already.
 
 ### 9.2 The REDCap Export Spreadsheet
 
-You need the current REDCap data export (an `.xlsx` file, e.g. `ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx`) saved somewhere accessible. This is what the tool reads each record's current on-file information from; it is never written back to.
+You need the current REDCap data export (an `.xlsx` file, e.g. `ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx`) saved in the same folder where `automated_comptroller_verifier.py` is located. This is what the tool reads each record's current on-file information from; it is never written back to.
 
 ### 9.3 The REDCap Credentials File
 
-Create a file named `redcap_config.py` in the same folder as the tool, containing:
+Create a file named `redcap_config.py` in the same folder as the tool if it is not already present, containing:
 
 ```python
 config = dict(
@@ -239,20 +233,20 @@ The `redcap_config.py` file contains a live credential for the REDCap project. K
 
 Each run requires one or more Record IDs and the REDCap export spreadsheet.
 
-**Basic shape:**
+**How to run:**
 
 ```
-python automated_comptroller_verifier.py <record id(s)> --xlsx <spreadsheet file>
+python automated_comptroller_verifier.py <record id(s)> --input <spreadsheet file> --apply
 ```
 
 **Common examples:**
 
 | You want to… | Command |
 |---|---|
-| Preview one record | `python automated_comptroller_verifier.py 400 --xlsx export.xlsx` |
-| Preview a range of records | `python automated_comptroller_verifier.py 3-50 --xlsx export.xlsx` |
-| Preview a specific mix of records | `python automated_comptroller_verifier.py 3 5 8 12-15 --xlsx export.xlsx` |
-| Actually write the confirmed changes to REDCap | `python automated_comptroller_verifier.py 400 --xlsx export.xlsx --apply` |
+| Preview one record | `python automated_comptroller_verifier.py 400 --input export.xlsx` |
+| Preview a range of records | `python automated_comptroller_verifier.py 3-50 --input export.xlsx` |
+| Preview a specific mix of records | `python automated_comptroller_verifier.py 3 5 8 12-15 --input export.xlsx` |
+| Actually write the confirmed changes to REDCap | `python automated_comptroller_verifier.py 400 --input export.xlsx --apply` |
 
 ### Dry run vs. Apply
 
@@ -284,7 +278,7 @@ The following command options are available:
 | Option | Required? | What it does |
 |---|---|---|
 | `<record id(s)>` | Yes | One or more Record IDs. Single ids, ranges (`3-10`), or a mix (`3 5 8-10`) all work. |
-| `--xlsx <file>` | Yes | Path to the REDCap export spreadsheet to read records from. |
+| `--input <file>` | Yes | Path to the REDCap export spreadsheet to read records from. |
 | `--apply` | No | Actually writes confirmed changes to REDCap. Without it, every run is a preview only. |
 | `--outdir <folder>` | No | Where the results workbook is saved. Defaults to a folder named `output`. |
 | `--skip-new-locations` | No | Skips checking whether the organization's website lists other branch locations. This check runs by default; add this flag to turn it off (useful for a very large multi-location provider, since it takes longer). |
@@ -313,7 +307,7 @@ Processing Record 9999: SKIPPED => ID NOT FOUND (0.0s)
 
 ### Combined Results Workbook
 
-`output/record_summary_redcap_id_<first>_to_<last>_TIME_<timestamp>.xlsx` is a single Excel file with three tabs:
+`output/summary_<first>_to_<last>_redcap_id_<timestamp>.xlsx` is a single Excel file with three tabs:
 
 - **Record Summary** (the tab that opens by default, and the main one to review): one row per record that was actually found in the spreadsheet, summarizing everything the tool found. Covered field-by-field in the next section.
 - **Other Locations**: every extra location an organization's website mentions that wasn't confident enough to create automatically -- missing a name, street number, or website, or a possible duplicate of a record that already exists elsewhere in REDCap. Each row includes a `reason` column explaining why it landed here instead (always starting with "Failed to add new record:"). These are **never** added to REDCap automatically; a person reviews this tab and decides whether/how to add them.
@@ -349,6 +343,9 @@ The Record Summary tab is the main file to review. The columns are described bel
 | Column | What it means |
 |---|---|
 | `redcap_record_id` | The REDCap Record ID this row is about. |
+| `updated_redcap_record` | **Yes** only if this run actually wrote a change into REDCap for this record. Always **No** during a dry run, always **No** whenever `manual_review_required` is Yes, and still **No** if the REDCap write itself failed (see below). |
+| `manual_review_required` | **Yes** if a person needs to look at the notes and decide by hand: the website showed more than one possible value for some field, a possible name change, no usable website at all, or (under `--apply`) REDCap itself refused the write or one of this record's own fields no longer matched what the change was based on. **No** means everything found was clear enough to act on automatically (or nothing needed changing at all). This is entirely about this record's own fields -- whether an additional location elsewhere on the same website was successfully created as its own new record (or failed to be) has no effect on this column; check the New Records Added / Other Locations tabs separately for that. |
+| `found_multiple_locations` | **Yes** if the organization's website lists other branch/office locations besides this one, whether those ended up as brand-new REDCap records or on the Other Locations tab. It doesn't say which happened -- check the New Records Added and Other Locations tabs for the details. |
 | `website_changed` / `website_old` / `website_new` | `website_changed` is **Yes** only when the website on file redirects to a genuinely different domain (not just an http/https or "www." difference). `website_old` is always the URL on file; `website_new` only appears when there's a real redirect to report. |
 | `phone_changed` / `phone_old` / `phone_new` | `phone_changed` is **Yes** only when the website clearly showed one new phone number that could be safely updated. `phone_old` is always the number on file; `phone_new` only appears when there's a confirmed new number. |
 | `fax_changed` / `fax_old` / `fax_new` | Same idea as phone, for the fax number. |
@@ -357,10 +354,6 @@ The Record Summary tab is the main file to review. The columns are described bel
 | `address_changed` / `address_old` / `address_new` | Same idea as phone, for the mailing address. `address_old` is always the full street/city/state/ZIP on file in one line; `address_new` only appears when there's a confirmed change. |
 | `name_changed` / `name_old` / `name_new` | `name_changed` is **Yes** if the website appears to display a different facility name. `name_old` is always the name on file; `name_new` only appears when a possible change was detected. This is **never** written to REDCap automatically; it's always left for a person to confirm, since a name change is a business decision. |
 | `notes` | The most important column. See below. |
-| `change_required` | **Yes** if this record needs any action at all, whether automatic or manual. **No** means the tool found nothing worth changing. |
-| `manual_review_required` | **Yes** if a person needs to look at the notes and decide by hand: the website showed more than one possible value for some field, a possible name change, no usable website at all, or (under `--apply`) REDCap itself refused the write or one of this record's own fields no longer matched what the change was based on. **No** means everything found was clear enough to act on automatically (or nothing needed changing at all). This is entirely about this record's own fields -- whether an additional location elsewhere on the same website was successfully created as its own new record (or failed to be) has no effect on this column; check the New Records Added / Other Locations tabs separately for that. |
-| `updated_redcap_record` | **Yes** only if this run actually wrote a change into REDCap for this record. Always **No** during a dry run, always **No** whenever `manual_review_required` is Yes, and still **No** if the REDCap write itself failed (see below). |
-| `found_multiple_locations` | **Yes** if the organization's website lists other branch/office locations besides this one, whether those ended up as brand-new REDCap records or on the Other Locations tab. It doesn't say which happened -- check the New Records Added and Other Locations tabs for the details. |
 
 ### Reading the `notes` column
 
@@ -379,7 +372,7 @@ When a record requires manual review for any field, none of that record’s fiel
 Use the following steps to review the Record Summary spreadsheet:
 
 1. Open the `record_summary_….xlsx` workbook for the run. It opens on the "Record Summary" tab.
-2. Filter or sort by `change_required` = **Yes** to see only the records with anything to act on.
+2. Filter or sort so `notes` isn't `Record up to date: No Change Required` to see only the records with anything to act on.
 3. For any row where `manual_review_required` = **Yes**, read the `notes` column, check the organization's website and REDCap side by side, and update REDCap by hand with the correct value.
 4. For any row where `updated_redcap_record` = **Yes**, REDCap has already been updated automatically for that record. A matching note was also added to that record's Additional Comments in REDCap, so there's a record of exactly what changed and why.
 5. Separately, switch to the "New Records Added" tab to see which additional locations were already created as brand-new REDCap records during this run. These are already live in REDCap; the row is just an audit trail of what was created, and where its county came from. Spot-check a few, and fill in the remaining REDCap fields (services, accreditation, and so on) by hand as usual for a new record.
@@ -464,7 +457,7 @@ This structure separates the source data, verification process, REDCap connectio
 ## 19. Questions and Troubleshooting
 
 **The tool says a Record ID wasn't found in the spreadsheet.**
-That Record ID is not present in the `.xlsx` file provided with `--xlsx`. Check the Record ID and confirm that the correct REDCap export file is being used. The program does not create a report row for a missing Record ID.
+That Record ID is not present in the `.xlsx` file provided with `--input`. Check the Record ID and confirm that the correct REDCap export file is being used. The program does not create a report row for a missing Record ID.
 
 **A record has no website on file.**
 The tool reports the missing website and stops processing that record. It does not search the internet for a replacement website.

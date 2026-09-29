@@ -33,7 +33,7 @@ update. What it DOES do reliably:
     guessing) and falling back to the same text-based extraction used
     elsewhere. These, and any other ambiguous multi-address findings for
     this record, go into the "Other Locations" tab of the run's output
-    workbook (default output/record_summary_redcap_id_<lo>_to_<hi>_TIME_
+    workbook (default output/summary_<lo>_to_<hi>_redcap_id_
     <timestamp>.xlsx, named after the id range this run covers and when
     it ran, each row tagged by record_id) -- for a human to review, never
     auto-added to REDCap.
@@ -50,12 +50,12 @@ computed from) and skips that one field if it's already changed since,
 and every applied record gets `change` set to Yes with a dated note
 appended to `change_explain` summarizing exactly what was changed.
 
-Usage (--xlsx is required -- no default spreadsheet is assumed):
-    python automated_comptroller_verifier.py 400 --xlsx ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx
-    python automated_comptroller_verifier.py 4 --xlsx <file> --skip-new-locations   # skip the (default-on) locations crawl
-    python automated_comptroller_verifier.py 3-10 --xlsx <file>            # a range, inclusive both ends
-    python automated_comptroller_verifier.py 3 5 8 12-15 --xlsx <file>      # a mix of single ids and ranges
-    python automated_comptroller_verifier.py 400 --xlsx <file> --apply      # actually write changes to REDCap
+Usage (--input is required -- no default spreadsheet is assumed):
+    python automated_comptroller_verifier.py 400 --input ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx
+    python automated_comptroller_verifier.py 4 --input <file> --skip-new-locations   # skip the (default-on) locations crawl
+    python automated_comptroller_verifier.py 3-10 --input <file>            # a range, inclusive both ends
+    python automated_comptroller_verifier.py 3 5 8 12-15 --input <file>      # a mix of single ids and ranges
+    python automated_comptroller_verifier.py 400 --input <file> --apply      # actually write changes to REDCap
 
 Each record ID (in a range or not) gets its own output/<record_id>.txt
 (only under --debug); the whole run also gets one combined output/
@@ -2061,7 +2061,7 @@ CREATED_LOCATIONS_COLUMNS = [
 
 
 SUMMARY_COLUMNS = [
-    "redcap_record_id",
+    "redcap_record_id", "updated_redcap_record", "manual_review_required", "found_multiple_locations",
     "website_changed", "website_old", "website_new",
     "phone_changed", "phone_old", "phone_new",
     "fax_changed", "fax_old", "fax_new",
@@ -2069,8 +2069,7 @@ SUMMARY_COLUMNS = [
     "social_changed", "social_old", "social_new",
     "address_changed", "address_old", "address_new",
     "name_changed", "name_old", "name_new",
-    "notes", "change_required",
-    "manual_review_required", "updated_redcap_record", "found_multiple_locations",
+    "notes",
 ]
 
 
@@ -2269,10 +2268,6 @@ def build_summary_row(record_id, result, record, updated_redcap=False, dry_run=F
         notes = "\n\n".join(note_sections) if note_sections else "Record up to date: No Change Required"
 
     manual_review_required = website_invalid or blocked or bool(redcap_error) or bool(redcap_skipped)
-    change_required = bool(
-        website_changed or phone_changed or fax_changed or email_changed or social_changed or address_changed
-        or name_changed or manual_review_required or found_multiple_locations
-    )
 
     def yn(b):
         return "Yes" if b else "No"
@@ -2287,7 +2282,6 @@ def build_summary_row(record_id, result, record, updated_redcap=False, dry_run=F
         "address_changed": yn(address_changed), "address_old": address_old, "address_new": address_new,
         "name_changed": yn(name_changed), "name_old": name_old, "name_new": name_new,
         "notes": notes,
-        "change_required": yn(change_required),
         "manual_review_required": yn(manual_review_required),
         "updated_redcap_record": yn(updated_redcap),
         "found_multiple_locations": yn(found_multiple_locations),
@@ -3020,13 +3014,13 @@ def main():
     parser.add_argument("record_ids", nargs="+",
                          help="one or more Record IDs, and/or ranges like 3-10 (inclusive). "
                               "Space- or comma-separated, e.g.: 400   3 5 8   3-10   3-5,8,12-15")
-    parser.add_argument("--xlsx", required=True,
+    parser.add_argument("--input", required=True,
                          help="path to the REDCap xlsx export (e.g. "
                               "ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx) to read records from. "
                               "Required -- no default, so this always runs against a file you explicitly named.")
     parser.add_argument("--outdir", default="output",
                          help="directory to write <record_id>.txt reports (and, by default, the "
-                              "record_summary_redcap_id_<lo>_to_<hi>_TIME_<timestamp>.xlsx workbook) "
+                              "summary_<lo>_to_<hi>_redcap_id_<timestamp>.xlsx workbook) "
                               "into (default: output)")
     parser.add_argument("--skip-new-locations", action="store_true",
                          help="do NOT crawl the site's \"locations\" index (if it has one) for other "
@@ -3048,7 +3042,7 @@ def main():
                               "REDCap or the network for writing.")
     parser.add_argument("--output-xlsx", default=None,
                          help="path to the single .xlsx workbook this run writes (default: "
-                              "<outdir>/record_summary_redcap_id_<lo>_to_<hi>_TIME_<timestamp>.xlsx, "
+                              "<outdir>/summary_<lo>_to_<hi>_redcap_id_<timestamp>.xlsx, "
                               "named after the id range and the exact time this run happened). "
                               "Contains three tabs: \"Record Summary\" (one row per valid record id, "
                               "see the field-by-field docs), \"Other Locations\" (every additional "
@@ -3120,7 +3114,7 @@ def main():
     dry_run_suffix = "" if args.apply else "_dry_run"
     run_timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H%M%S")
     run_workbook_path = args.output_xlsx or os.path.join(
-        args.outdir, f"record_summary_redcap_id_{id_range_suffix}_TIME_{run_timestamp}{dry_run_suffix}.xlsx")
+        args.outdir, f"summary_{id_range_suffix}_redcap_id_{run_timestamp}{dry_run_suffix}.xlsx")
     all_other_location_rows = []
     all_created_location_rows = []
     summary_rows = []
@@ -3140,7 +3134,7 @@ def main():
         # nothing else: no report file (even under --debug), no summary
         # row, no per-record work attempted at all.
         try:
-            record = load_record(args.xlsx, record_id)
+            record = load_record(args.input, record_id)
         except ValueError:
             elapsed = time.time() - record_start
             print(f"Processing Record {record_id:>{id_width}}: SKIPPED => ID NOT FOUND ({elapsed:.1f}s)")
@@ -3162,7 +3156,7 @@ def main():
         try:
             with contextlib.redirect_stdout(sink):
                 try:
-                    result = verify(record_id, args.xlsx, not args.skip_new_locations, args.debug)
+                    result = verify(record_id, args.input, not args.skip_new_locations, args.debug)
                 except Exception as e:
                     # one bad record (any failure besides a missing id,
                     # already handled above) must not take down the rest
