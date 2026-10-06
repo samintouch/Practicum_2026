@@ -126,6 +126,36 @@ def street_number(street):
     m = re.match(r"\s*(\d+)", str(street))
     return m.group(1) if m else None
 
+
+# A real case (record 404, carencia.com): a page listed its own physical
+# street address right next to its mailing "PO BOX 121592" -- the address
+# regexes anchor on the first digit they find, with no idea that a
+# "PO Box ####" phrase's own number isn't a street number at all, so the
+# box number got picked up as "the street" instead of the real address
+# sitting right next to it. Checked by _looks_like_real_street below,
+# wherever a candidate street is about to be trusted.
+_PO_BOX_RE = re.compile(r"\bP\.?\s*O\.?\s*BOX\b|\bPOST\s+OFFICE\s+BOX\b", re.IGNORECASE)
+
+
+def _looks_like_real_street(street):
+    """A street string needs BOTH a house NUMBER and an actual street
+    NAME (not just digits) to be trusted as a real address. Per the
+    user's explicit request: a PO Box is never a street address (its own
+    box number is excluded outright), and more generally, a bare number
+    with nothing recognizable as a name after it (e.g. a street-number
+    line that got separated from its own street name during extraction)
+    isn't usable either -- both cases should be left for a human to
+    confirm rather than silently used or guessed at."""
+    if not street:
+        return False
+    if _PO_BOX_RE.search(street):
+        return False
+    if not street_number(street):
+        return False
+    rest = re.sub(r"^\s*\d+\s*", "", str(street))
+    return bool(re.search(r"[A-Za-z]", rest))
+
+
 # Website text can contain characters (curly quotes, en-dashes, etc.)
 # that Windows' default console codepage (cp1252) can't encode, which
 # crashes plain `print()` mid-report. Force UTF-8 on stdout/stderr instead
@@ -796,8 +826,11 @@ def parse_street_city_state_zip(snippet):
     if embedded:
         street = f"{street} {embedded.group(1)}"
         city = embedded.group(2)
+    street = street.strip(" ,")
+    if not _looks_like_real_street(street):
+        return None
     return {
-        "street": street.strip(" ,"),
+        "street": street,
         "city": city.strip(" ,"),
         "state": _normalize_state(state),
         "zip": zip_.strip(),
@@ -866,12 +899,14 @@ def extract_addresses(text):
                 street_parts.insert(0, prev)
             break
         if street_parts:
-            results.append({
-                "street": " ".join(street_parts),
-                "city": city.strip(" ,"),
-                "state": _normalize_state(state),
-                "zip": zip_.strip(),
-            })
+            candidate_street = " ".join(street_parts)
+            if _looks_like_real_street(candidate_street):
+                results.append({
+                    "street": candidate_street,
+                    "city": city.strip(" ,"),
+                    "state": _normalize_state(state),
+                    "zip": zip_.strip(),
+                })
             continue
         window = "\n".join(lines[max(0, i - 1):i + 1])
         parsed = parse_street_city_state_zip(window)
@@ -881,6 +916,35 @@ def extract_addresses(text):
     # zip_state_plausible's docstring) -- typically leftover template
     # placeholder content, not a real address
     return [r for r in results if zip_state_plausible(r["zip"], r["state"])]
+
+
+def find_po_box_near_city_zip(text, city, zip_code):
+    """extract_addresses (via _looks_like_real_street) correctly refuses
+    to ever treat a PO Box's own number as a street address -- but that
+    means a PO Box mention right next to this record's own city/zip
+    otherwise disappears entirely, looking no different from a page that
+    never mentioned an address at all. This is used only to tell those
+    two apart for manual-review purposes: when nothing else about the
+    address could be confirmed, this flags "a PO Box was found here, but
+    no usable street address" instead of silently reporting nothing.
+    Returns the matched "PO Box ... City, ST ZIP" text snippet, or None."""
+    if not zip_code and not city:
+        return None
+    city_zip_re = re.compile(rf"([A-Za-z .]+?),?\s+({_STATE_PATTERN}),?\s+(\d{{5}})", re.IGNORECASE)
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if not _PO_BOX_RE.search(line):
+            continue
+        window = "\n".join(lines[i:i + 2])
+        m = city_zip_re.search(window)
+        if not m:
+            continue
+        found_city, _, found_zip = m.groups()
+        city_hit = bool(city) and found_city.strip().upper() == str(city).strip().upper()
+        zip_hit = bool(zip_code) and found_zip[:5] == str(zip_code)[:5]
+        if city_hit or zip_hit:
+            return re.sub(r"\s+", " ", window).strip()
+    return None
 
 
 _PHONE_TOKEN_RE = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
@@ -1289,6 +1353,29 @@ def _extract_page_signals(pages):
             site_names.setdefault(key, value)  # keep the home page's version if seen first
         text_blobs.append(page_text)
     return href_labels, text_labels, all_mailto, all_social, site_names, text_blobs
+
+
+# Large third-party doctor-finder/directory sites (and a few provider
+# networks big enough to effectively be one) list hundreds or thousands
+# of OTHER, unrelated organizations' own locations on the very same
+# domain a record's own website happens to be on -- crawling "other
+# locations" there would create new REDCap records for completely
+# unrelated providers, not additional branches of the record being
+# checked (a real case: record 415's own site is
+# "doctors.wellmedhealthcare.com", a directory subdomain listing every
+# WellMed-affiliated doctor's own clinic nationwide). Add a bare domain
+# here (no "www.", no scheme, no path) to skip ALL same-page and
+# separate-index-page "other locations" finding for any record whose own
+# website is on that domain OR a subdomain of it.
+KNOWN_LOCATION_DIRECTORY_DOMAINS = {
+    "zocdoc.com",
+    "wellmedhealthcare.com",
+}
+
+
+def _is_known_location_directory_domain(url):
+    host = (urlparse(url).netloc or "").lower().split("@")[-1].split(":")[0].removeprefix("www.")
+    return any(host == d or host.endswith("." + d) for d in KNOWN_LOCATION_DIRECTORY_DOMAINS)
 
 
 # REDCap field variable names for this project (from the project's own
@@ -1754,7 +1841,7 @@ def find_live_redcap_duplicate(loc, exclude_record_id=None):
     return None
 
 
-def create_redcap_location_record(loc, parent_record_id):
+def create_redcap_location_record(loc, parent_record_id, parent_record=None):
     """Creates a brand new REDCap record for one "other location" found on
     a site -- name/street/city/state/zip/phone/fax/website plus a
     best-effort county lookup (see lookup_county_for_address) are set;
@@ -1774,10 +1861,24 @@ def create_redcap_location_record(loc, parent_record_id):
     new record later can trace it back to where it came from and how it
     got there, the same way a manual entry would note its own source.
 
+    `parent_record` (the parent's own on-file dict, as returned by
+    load_record) is used ONLY as a phone/fax fallback, per the user's
+    request: a location detail page often shows an address with no phone
+    or fax of its own at all (unlike the sitewide "quick nav" pooling
+    problem elsewhere, there's sometimes just nothing there to find), and
+    the parent organization's own on-file number is a far more reasonable
+    default for a human to later correct than leaving the field blank --
+    this is still the same organization, calling the same front desk,
+    until someone updates it. Never overrides a phone/fax this location
+    DOES have its own.
+
     Returns (new_record_id, county) -- county is whatever
     lookup_county_for_address found, or None."""
     config = _load_redcap_config()
     county = lookup_county_for_address(loc.get("street"), loc.get("city"), loc.get("state"), loc.get("zip"))
+    parent_record = parent_record or {}
+    phone = loc.get("phone") or _on_file_display(parent_record.get("phone"))
+    fax = loc.get("fax") or _on_file_display(parent_record.get("fax"))
     payload = {
         "record_id": "0",  # placeholder -- forceAutoNumber replaces this
         REDCAP_NAME_FIELD: loc["effective_name"],
@@ -1785,8 +1886,8 @@ def create_redcap_location_record(loc, parent_record_id):
         REDCAP_FIELD_MAP["city"]: loc.get("city") or "",
         REDCAP_FIELD_MAP["state"]: loc.get("state") or "",
         REDCAP_FIELD_MAP["zip"]: loc.get("zip") or "",
-        REDCAP_FIELD_MAP["phone"]: loc.get("phone") or "",
-        REDCAP_FIELD_MAP["fax"]: loc.get("fax") or "",
+        REDCAP_FIELD_MAP["phone"]: phone,
+        REDCAP_FIELD_MAP["fax"]: fax,
         REDCAP_FIELD_MAP["website"]: loc.get("url") or "",
         REDCAP_PHASE1_COMPLETE_FIELD: "0",
         REDCAP_ORGSTATUS_FIELD: REDCAP_ORGSTATUS_OPEN,
@@ -1811,7 +1912,7 @@ def create_redcap_location_record(loc, parent_record_id):
     new_id = result[0] if isinstance(result, list) and result else None
     if not new_id:
         raise RuntimeError(f"REDCap did not return a new record id -- response: {result}")
-    return new_id, county
+    return new_id, county, phone, fax
 
 
 def _clean_location_name(name):
@@ -2433,7 +2534,21 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
         if not html_text:
             continue
         primary_html, other_html = split_html_primary_other(html_text)
-        primary_pages[url] = primary_html
+        if other_html and not split_into_branch_blocks(strip_tags(other_html)):
+            # The heading that triggered this split (a bare "Locations"
+            # heading commonly qualifies -- see _OTHER_LOCATIONS_HEADING_
+            # HTML_RE) didn't actually introduce a multi-branch list: no
+            # ALL-CAPS label lines were found to split branches on, so
+            # whatever follows is just more of this SAME location's own
+            # contact info, not other offices. A real case (record 404,
+            # carencia.com): a "Locations" heading was followed only by
+            # this record's own physical address, its mailing PO Box, and
+            # a prose list of states it offers telehealth in -- none of
+            # it another branch. Treating that as "other" discarded the
+            # record's own address entirely, rather than ever comparing
+            # it. Undo the split and keep the whole page as primary.
+            other_html = None
+        primary_pages[url] = html_text if other_html is None else primary_html
         if other_html:
             other_html_by_url[url] = other_html
 
@@ -2454,7 +2569,11 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
             rendered = _fetch_browser(url)
             if rendered:
                 primary_rendered, other_rendered = split_html_primary_other(rendered)
-                browser_pages[url] = primary_rendered
+                if other_rendered and not split_into_branch_blocks(strip_tags(other_rendered)):
+                    # same false-positive-split check as the plain-fetch
+                    # pass above, applied to the rendered HTML too
+                    other_rendered = None
+                browser_pages[url] = rendered if other_rendered is None else primary_rendered
                 if other_rendered and url not in other_html_by_url:
                     other_html_by_url[url] = other_rendered
         b_href, b_text, b_mailto, b_social, b_names, b_blobs = _extract_page_signals(browser_pages)
@@ -2653,19 +2772,32 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
     def _not_own_location(loc):
         return not (loc["street"] and own_street_num and street_number(loc["street"]) == own_street_num)
 
+    # A record on a known doctor-directory domain (see
+    # KNOWN_LOCATION_DIRECTORY_DOMAINS) lists hundreds/thousands of OTHER
+    # providers' own locations, not additional branches of this record --
+    # skip every "other locations" mechanism entirely for it, same as
+    # --skip-new-locations, rather than trying to create a new REDCap
+    # record for every unrelated listing on the site.
+    is_directory_site = _is_known_location_directory_domain(resolved_website or website)
+
     # same-page branches (an "Office Locations" list on the SAME contact
     # page) cost nothing extra to check -- always look, regardless of
     # --skip-new-locations, unlike the separate-index-page crawl below
     same_page_locations = []
-    for url, other_html in other_html_by_url.items():
-        for name, block_text in split_into_branch_blocks(strip_tags(other_html)):
-            info = extract_branch_info(name, block_text, url)
-            if info and _not_own_location(info):
-                same_page_locations.append(info)
+    if not is_directory_site:
+        for url, other_html in other_html_by_url.items():
+            for name, block_text in split_into_branch_blocks(strip_tags(other_html)):
+                info = extract_branch_info(name, block_text, url)
+                if info and _not_own_location(info):
+                    same_page_locations.append(info)
 
     other_locations = list(same_page_locations) + [loc for loc in address_other_locations if _not_own_location(loc)]
     skip_hint = None
-    if check_other_locations:
+    if is_directory_site:
+        other_locations = []
+        skip_hint = ("  (this site is a known doctor directory -- see KNOWN_LOCATION_DIRECTORY_DOMAINS -- "
+                      "so its other listings were not treated as additional locations)")
+    elif check_other_locations:
         for loc in find_other_locations(resolved_website or website, pages.get(website) or "", record):
             if _not_own_location(loc):
                 other_locations.append(loc)
@@ -2976,6 +3108,20 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
         needs_review_details["Address"] = [
             f"{a['street']}, {a['city']}, {a['state']} {a['zip']}" for a in address_other_locations
         ]
+    elif not mismatched_addrs and not relocation_candidates:
+        # Nothing else about the address could be confirmed -- but a PO
+        # Box mentioned right next to this record's own city/zip (which
+        # extract_addresses correctly refuses to ever use as a street,
+        # see _looks_like_real_street) would otherwise disappear here,
+        # looking identical to a page that never mentioned an address at
+        # all. Flag it instead of silently reporting nothing, so a human
+        # knows there's something on the site worth a manual look.
+        po_box_hit = find_po_box_near_city_zip(full_text, record_city, record_zip)
+        if po_box_hit:
+            needs_review.append("Address")
+            needs_review_details["Address"] = [
+                f"site lists a PO Box near this record's city/zip, not a usable street address -- {po_box_hit!r}"
+            ]
     name_changed = bool(best_name_match and best_name_match[1] < 0.5)
 
     return {"record_id": record_id, "field_changes": field_changes, "other_locations": other_locations_for_tab,
@@ -3210,7 +3356,8 @@ def main():
                                 })
                                 continue
                             try:
-                                new_id, county = create_redcap_location_record(loc, record_id)
+                                new_id, county, used_phone, used_fax = create_redcap_location_record(
+                                    loc, record_id, record)
                             except Exception as e:
                                 # never silently dropped -- falls back to the
                                 # Other Locations tab, same as any other
@@ -3224,12 +3371,13 @@ def main():
                                 })
                             else:
                                 _remember_created_location_for_dedup(loc, new_id)
-                                created_locations.append({**loc, "new_record_id": new_id, "county": county})
+                                created_locations.append({**loc, "new_record_id": new_id, "county": county,
+                                                           "phone": used_phone, "fax": used_fax})
                                 all_created_location_rows.append({
                                     "record_id": record_id, "new_record_id": new_id,
                                     "name": loc["effective_name"], "street": loc.get("street"),
                                     "city": loc.get("city"), "state": loc.get("state"), "zip": loc.get("zip"),
-                                    "county": county, "phone": loc.get("phone"), "fax": loc.get("fax"),
+                                    "county": county, "phone": used_phone, "fax": used_fax,
                                     "url": loc.get("url"),
                                 })
                                 print(f"  Created record {new_id}: {loc['effective_name']} -- {loc['url']}")
