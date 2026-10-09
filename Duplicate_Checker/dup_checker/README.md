@@ -14,7 +14,7 @@ review, not a final decision.
 - Optional: Playwright's Chromium browser. Without it, websites that block plain downloads are
   reported as unreachable.
 
-Step-by-step setup instructions for a new computer are in `../Duplicate_Finder_Readme.md`.
+Step-by-step setup instructions for a new computer are in `../Duplicate_Checker_Readme.md`.
 
 ## Running
 
@@ -77,9 +77,10 @@ Two notes columns:
   Records that were updated are listed at the end of "notes from automation", e.g. `REDCap updated on
   10/08/2026: record 13 (duplicate=No, Validation=Yes, ...); record 527 (...)`. A failed update is noted
   there too. The tab is saved before REDCap is contacted and updated again afterwards.
-- **"status"** (added by the app), colored: **need review** (orange) for "Manual review required"
-  rows. After `--apply`, the kept record's row shows **updated** (green), **partly updated** (green),
-  **skipped** (yellow) or **failed** (red) for that record and its duplicates. Blank otherwise.
+- **"status"** (added by the app), colored: **Not Duplicate** (grey) for "Not a duplicate" rows and
+  **need review** (orange) for "Manual review required" rows. After `--apply`, the kept record's row
+  shows **updated** (green), **partly updated** (green), **skipped** (yellow) or **failed** (red) for
+  that record and its duplicates. A kept record's status is blank in a run without `--apply`.
 - **"notes from automation"** (added by the app): how the app reached the decision. This covers the
   group, the reason for each comparison, and whether it came from a rule check or the AI review.
 

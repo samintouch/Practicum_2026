@@ -26,6 +26,7 @@ FILLS = {
     "updated": PatternFill("solid", fgColor="C6EFCE"),
     "partly updated": PatternFill("solid", fgColor="C6EFCE"),
     "need review": PatternFill("solid", fgColor="F4B183"),
+    "Not Duplicate": PatternFill("solid", fgColor="E7E6E6"),
     "skipped": PatternFill("solid", fgColor="FFEB9C"),
     "failed": PatternFill("solid", fgColor="F8CBAD"),
 }

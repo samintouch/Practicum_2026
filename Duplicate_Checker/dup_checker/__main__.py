@@ -262,7 +262,7 @@ def _redcap_failed(exc: Exception, config_path: Path, during: str, log: Path | N
         if log:
             lines += [f"Records that may have been changed, with their old values (for undo), are in:",
                       f"  {log.resolve()}"]
-    lines += [f"Check the REDCap address and API token in {config_path} (see Duplicate_Finder_Readme.md),",
+    lines += [f"Check the REDCap address and API token in {config_path} (see Duplicate_Checker_Readme.md),",
               "and the network/VPN connection. Until this is resolved, run the app WITHOUT --apply:",
               "it still checks the duplicates and fills in the Tracking Duplicates tab.",
               "=" * 78]

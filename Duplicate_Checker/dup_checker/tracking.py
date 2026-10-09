@@ -49,7 +49,7 @@ HEADERS = [
 NOTES_COL, AUTOMATION_COL, STATUS_COL = 13, 14, 15   # M: comment --apply puts in REDCap, N: app's explanation, O: status
 STATUS_COLORS = {                                    # same colors as the REDCap change log
     "updated": "C6EFCE", "partly updated": "C6EFCE", "skipped": "FFEB9C", "failed": "F8CBAD",
-    "need review": "F4B183",
+    "need review": "F4B183", "Not Duplicate": "E7E6E6",
 }
 SOURCE = {"Rule": "rule check", "AI": "AI review", "Website rule": "website check"}
 
@@ -97,7 +97,7 @@ def build_rows(results: list[RecordResult], run_date: date | None = None,
         # "validated date?": the run date for decided records; blank while a person still has to decide
         validated = "" if rec == "Needs review" else run_date
         redcap_note = redcap_comment.get(r.record_id, "")
-        status = "need review" if rec == "Needs review" else ""
+        status = {"Needs review": "need review", "Not a duplicate": "Not Duplicate"}.get(rec, "")
         if r.record_id in outcome_by_set:
             redcap_note, note = _with_redcap_outcome(outcome_by_set[r.record_id], r.record_id, redcap_note,
                                                      note, run_date)
