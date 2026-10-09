@@ -125,17 +125,17 @@ Every run needs a record ID (or several) and the spreadsheet to read from.
 **Basic shape:**
 
 ```
-python automated_comptroller_verifier.py <record id(s)> --xlsx <spreadsheet file>
+python automated_comptroller_verifier.py <record id(s)> --input <spreadsheet file>
 ```
 
 **Common examples:**
 
 | You want to… | Command |
 |---|---|
-| Preview one record | `python automated_comptroller_verifier.py 400 --xlsx export.xlsx` |
-| Preview a range of records | `python automated_comptroller_verifier.py 3-50 --xlsx export.xlsx` |
-| Preview a specific mix of records | `python automated_comptroller_verifier.py 3 5 8 12-15 --xlsx export.xlsx` |
-| Actually write the confirmed changes to REDCap | `python automated_comptroller_verifier.py 400 --xlsx export.xlsx --apply` |
+| Preview one record | `python automated_comptroller_verifier.py 400 --input export.xlsx` |
+| Preview a range of records | `python automated_comptroller_verifier.py 3-50 --input export.xlsx` |
+| Preview a specific mix of records | `python automated_comptroller_verifier.py 3 5 8 12-15 --input export.xlsx` |
+| Actually write the confirmed changes to REDCap | `python automated_comptroller_verifier.py 400 --input export.xlsx --apply` |
 
 ### Dry run vs. Apply
 
@@ -168,7 +168,7 @@ Everything you can add after `automated_comptroller_verifier.py`:
 | Option | Required? | What it does |
 |---|---|---|
 | `<record id(s)>` | Yes | One or more Record IDs. Single ids, ranges (`3-10`), or a mix (`3 5 8-10`) all work. |
-| `--xlsx <file>` | Yes | Path to the REDCap export spreadsheet to read records from. |
+| `--input <file>` | Yes | Path to the REDCap export spreadsheet to read records from. |
 | `--apply` | No | Actually writes confirmed changes to REDCap. Without it, every run is a preview only. |
 | `--outdir <folder>` | No | Where the results workbook is saved. Defaults to a folder named `output`. |
 | `--skip-new-locations` | No | Skips checking whether the organization's website lists other branch locations. This check runs by default; add this flag to turn it off (useful for a very large multi-location provider, since it takes longer). |
@@ -199,7 +199,7 @@ Total time to process 4 record(s): 44.9s
 
 ### Combined Results Workbook
 
-`output/record_summary_redcap_id_<first>_to_<last>_TIME_<timestamp>.xlsx` is a single Excel file with two tabs:
+`output/summary_<first>_to_<last>_redcap_id_<timestamp>.xlsx` is a single Excel file with two tabs:
 
 - **Record Summary** (the tab that opens by default, and the main one to review): one row per record that was actually found in the spreadsheet, summarizing everything the tool found. Covered field-by-field in the next section.
 - **Other Locations**: every extra location an organization's website mentions (another branch, a second clinic, and so on) that isn't this record's own address. These are **never** added to REDCap automatically; a person reviews this tab and decides whether/how to add them as new records.
@@ -211,6 +211,9 @@ This is the file to open first. Every column, explained in plain English.
 | Column | What it means |
 |---|---|
 | `redcap_record_id` | The REDCap Record ID this row is about. |
+| `updated_redcap_record` | **Yes** only if this run actually wrote a change into REDCap for this record. Always **No** during a dry run, always **No** whenever `manual_review_required` is Yes, and still **No** if the REDCap write itself failed (see below). |
+| `manual_review_required` | **Yes** if a person needs to look at the notes and decide by hand: the website showed more than one possible value for some field, a possible name change, no usable website at all, or (under `--apply`) REDCap itself refused or only partially accepted the write. **No** means everything found was clear enough to act on automatically (or nothing needed changing at all). |
+| `found_multiple_locations` | **Yes** if the organization's website lists other branch/office locations besides this one. See the Other Locations tab for the details. These are never added to REDCap automatically. |
 | `website_changed` / `website_old` / `website_new` | `website_changed` is **Yes** only when the website on file redirects to a genuinely different domain (not just an http/https or "www." difference). `website_old` is always the URL on file; `website_new` only appears when there's a real redirect to report. |
 | `phone_changed` / `phone_old` / `phone_new` | `phone_changed` is **Yes** only when the website clearly showed one new phone number that could be safely updated. `phone_old` is always the number on file; `phone_new` only appears when there's a confirmed new number. |
 | `fax_changed` / `fax_old` / `fax_new` | Same idea as phone, for the fax number. |
@@ -219,10 +222,6 @@ This is the file to open first. Every column, explained in plain English.
 | `address_changed` / `address_old` / `address_new` | Same idea as phone, for the mailing address. `address_old` is always the full street/city/state/ZIP on file in one line; `address_new` only appears when there's a confirmed change. |
 | `name_changed` / `name_old` / `name_new` | `name_changed` is **Yes** if the website appears to display a different facility name. `name_old` is always the name on file; `name_new` only appears when a possible change was detected. This is **never** written to REDCap automatically; it's always left for a person to confirm, since a name change is a business decision. |
 | `notes` | The most important column. See below. |
-| `change_required` | **Yes** if this record needs any action at all, whether automatic or manual. **No** means the tool found nothing worth changing. |
-| `manual_review_required` | **Yes** if a person needs to look at the notes and decide by hand: the website showed more than one possible value for some field, a possible name change, no usable website at all, or (under `--apply`) REDCap itself refused or only partially accepted the write. **No** means everything found was clear enough to act on automatically (or nothing needed changing at all). |
-| `updated_redcap_record` | **Yes** only if this run actually wrote a change into REDCap for this record. Always **No** during a dry run, always **No** whenever `manual_review_required` is Yes, and still **No** if the REDCap write itself failed (see below). |
-| `found_multiple_locations` | **Yes** if the organization's website lists other branch/office locations besides this one. See the Other Locations tab for the details. These are never added to REDCap automatically. |
 
 ### Reading the `notes` column
 
@@ -242,7 +241,7 @@ It always takes one of these forms:
 A simple pass through the Record Summary spreadsheet:
 
 1. Open the `record_summary_….xlsx` workbook for the run. It opens on the "Record Summary" tab.
-2. Filter or sort by `change_required` = **Yes** to see only the records with anything to act on.
+2. Filter or sort so `notes` isn't `Record up to date: No Change Required` to see only the records with anything to act on.
 3. For any row where `manual_review_required` = **Yes**, read the `notes` column, check the organization's website and REDCap side by side, and update REDCap by hand with the correct value.
 4. For any row where `updated_redcap_record` = **Yes**, REDCap has already been updated automatically for that record. A matching note was also added to that record's Additional Comments in REDCap, so there's a record of exactly what changed and why.
 5. Separately, switch to the "Other Locations" tab for any additional branch/office locations worth adding to REDCap as new records.
@@ -250,7 +249,7 @@ A simple pass through the Record Summary spreadsheet:
 ## 10. Questions & troubleshooting
 
 **The tool says a Record ID wasn't found in the spreadsheet.**
-That ID doesn't exist in the `.xlsx` file you pointed `--xlsx` at. Double-check the ID and that you're using the intended export file. No report or spreadsheet row is created for a missing ID.
+That ID doesn't exist in the `.xlsx` file you pointed `--input` at. Double-check the ID and that you're using the intended export file. No report or spreadsheet row is created for a missing ID.
 
 **A record has no website on file.**
 The tool reports this and stops there for that record. It never searches the internet to find one on its own.

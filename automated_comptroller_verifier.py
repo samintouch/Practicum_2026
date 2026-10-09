@@ -127,6 +127,66 @@ def street_number(street):
     return m.group(1) if m else None
 
 
+def _suite_identifiers(street):
+    """Every suite/unit/apartment identifier mentioned in a street string,
+    as a set (e.g. {"A", "J"} from "14470 Horizon Blvd Suite A and J", or
+    {"510"} from "11500 State Hwy 121, Suite 510") -- empty if it doesn't
+    mention one at all. A COMPOUND designation like "Suite A and J" means
+    two suites together, so this splits on "and"/"&"/"/"/"," rather than
+    just grabbing the first token -- otherwise a record whose on-file
+    address says "STE J" would look like a different suite than a site
+    that (more completely) lists "Suite A and J", when J is actually one
+    of the two meant. Used alongside street_number() by is_same_location
+    below, so two addresses that share a house number but are actually
+    DIFFERENT suites in the same building/complex aren't wrongly treated
+    as one and the same location."""
+    if not street:
+        return set()
+    text = str(street)
+    m = re.search(r"(?:STE|SUITE|UNIT|APT|#)\.?\s*([0-9A-Za-z-]+)", text, re.IGNORECASE)
+    if not m:
+        return set()
+    tokens = {m.group(1).upper()}
+    # chain on additional short tokens joined by "and"/"&"/"/"/"," directly
+    # after the first one (e.g. the "J" in "Suite A and J") -- capped at 6
+    # characters so this stops at the next real word instead of accidentally
+    # swallowing the rest of the address (e.g. "Ste J Horizon City" must NOT
+    # pull in "Horizon" as if it were a second suite token)
+    pos = m.end()
+    while True:
+        extra = re.match(r"\s*(?:,|&|/|and)\s+([0-9A-Za-z-]{1,6})\b", text[pos:], re.IGNORECASE)
+        if not extra:
+            break
+        tokens.add(extra.group(1).upper())
+        pos += extra.end()
+    return tokens
+
+
+def is_same_location(street_a, street_b):
+    """True when two street strings look like the SAME physical address
+    -- matching house number, AND, when BOTH sides actually mention a
+    suite/unit, at least one OVERLAPPING suite identifier (see
+    _suite_identifiers' docstring for why this is a set-overlap check,
+    not plain equality). A shared house number alone isn't always
+    enough: a real case (record 74, compassionatepsychiatry.org) had the
+    record's own "11500 State Hwy 121, Suite 510" and a completely
+    different practice's "11500 State Hwy 121, Suite 930" in the very
+    same building -- comparing house numbers alone wrongly treated the
+    other practice's suite as "this record's own address" and silently
+    dropped it, instead of surfacing it as a genuinely different
+    other-location candidate. When only ONE side mentions a suite (or
+    neither does), the house number alone is treated as enough signal,
+    same as before -- this only splits two addresses apart when they
+    explicitly disagree on which suite within the same building."""
+    num_a, num_b = street_number(street_a), street_number(street_b)
+    if not num_a or not num_b or num_a != num_b:
+        return False
+    suites_a, suites_b = _suite_identifiers(street_a), _suite_identifiers(street_b)
+    if suites_a and suites_b and not (suites_a & suites_b):
+        return False
+    return True
+
+
 # A real case (record 404, carencia.com): a page listed its own physical
 # street address right next to its mailing "PO BOX 121592" -- the address
 # regexes anchor on the first digit they find, with no idea that a
@@ -168,7 +228,16 @@ FETCH_TIMEOUT_SEC = 15
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; FieldVerifyBot/1.0)"}
 
 SOCIAL_DOMAINS = {
-    "facebook": r"(?<![A-Za-z0-9-])facebook\.com/[A-Za-z0-9._-]+/?",
+    # (?!\d+/fbml\b) excludes Facebook's own XFBML XML namespace
+    # declaration -- countless sites (a real case: record 116,
+    # morganpsychiatry.com, a Squarespace site) carry boilerplate markup
+    # like `xmlns:fb="http://www.facebook.com/2008/fbml"` in their <html>
+    # tag, which has nothing to do with the organization's own Facebook
+    # page -- without this exclusion, "facebook.com/2008" (the namespace
+    # year) gets read as if it were the org's real Facebook URL. A
+    # genuine numeric Facebook page id (e.g. "facebook.com/100064573943212")
+    # is unaffected, since it's never followed by "/fbml".
+    "facebook": r"(?<![A-Za-z0-9-])facebook\.com/(?!\d+/fbml\b)[A-Za-z0-9._-]+/?",
     "instagram": r"(?<![A-Za-z0-9-])instagram\.com/[A-Za-z0-9._-]+/?",
     # (?<![A-Za-z0-9-]) matters a lot for "x.com" specifically -- without it,
     # this also matches inside unrelated domains that happen to END in
@@ -1266,10 +1335,9 @@ def find_other_locations(website, home_html, record):
             ta = info["text_addr"]
             info["street"], info["city"], info["state"], info["zip"] = ta["street"], ta["city"], ta["state"], ta["zip"]
 
-    own_street_num = street_number(record["street"])
     locations = [
         info for info in infos
-        if not (info["street"] and own_street_num and street_number(info["street"]) == own_street_num)
+        if not (info["street"] and is_same_location(info["street"], record["street"]))
     ]
     if truncated:
         print(f"  (site lists {len(detail_links)} locations; only the first {max_crawl} were crawled)")
@@ -1784,6 +1852,106 @@ def lookup_county_for_address(street, city, state, zip_code):
             or _lookup_county_nominatim(clean_street, city, state, zip_code))
 
 
+_OLLAMA_API_URL = "http://localhost:11434/api/generate"
+_AI_ASSIST_TIMEOUT_SEC = 45
+_AI_ASSIST_CONTEXT_MAX_CHARS = 1500
+
+
+def _context_snippet_for_candidates(full_text, candidates, max_chars=_AI_ASSIST_CONTEXT_MAX_CHARS,
+                                     max_occurrences_each=3):
+    """A short, grounded excerpt of the page text around EVERY occurrence
+    of each candidate value (up to max_occurrences_each) -- e.g. the
+    address/phone lines surrounding a specific phone number -- so the AI
+    model (see ai_suggest_candidate) has the same surrounding context a
+    human reviewer would use to judge which candidate is really this
+    record's own, not just a bare list of numbers with nothing to tell
+    them apart.
+
+    Collecting only the FIRST occurrence (an earlier version of this
+    function did that) is a real trap: a real case had "915-235-0943"
+    appear twice on the same page -- once correctly next to this
+    record's own address, and once in an unrelated duplicate footer/nav
+    block (a common pattern on responsive sites: a hidden mobile-menu
+    copy of the footer, sitting earlier in the raw HTML than the visible
+    one). Taking only the first match handed the model the WRONG pairing
+    and it confidently picked a different, incorrect number. Each
+    snippet is labeled with which candidate it's for, since a page can
+    legitimately mention the same candidate near more than one address.
+
+    Matched loosely (digits/letters only, case-insensitive) since a
+    candidate's own formatting ("(214) 227-7377") rarely matches the
+    page's raw text exactly ("214-227-7377"). Capped to max_chars so one
+    record with many candidates (and now up to 3x the snippets per
+    candidate) can't blow up the prompt and, with it, the latency."""
+    if not full_text or not candidates:
+        return ""
+    lines = full_text.split("\n")
+    normalized_lines = [re.sub(r"[^0-9A-Za-z]", "", line).lower() for line in lines]
+    snippets = []
+    for cand in candidates:
+        needle = re.sub(r"[^0-9A-Za-z]", "", str(cand)).lower()
+        if not needle:
+            continue
+        found = 0
+        for i, hay in enumerate(normalized_lines):
+            if needle not in hay:
+                continue
+            window = "\n".join(l for l in lines[max(0, i - 1):i + 2] if l.strip())
+            if window:
+                snippets.append(f"[{cand}]\n{window}")
+                found += 1
+            if found >= max_occurrences_each:
+                break
+    return "\n...\n".join(snippets)[:max_chars]
+
+
+def ai_suggest_candidate(label, record, candidates, full_text, model):
+    """Consults a locally-running Ollama model (see --ai-assist) for a
+    short, advisory opinion on an otherwise-ambiguous field -- called
+    ONLY when this script's own deterministic rules already couldn't
+    decide (multiple real candidates found on the site, none matching
+    what's on file). The result is never used to decide anything on its
+    own: it's appended to the existing manual-review note as a clearly
+    labeled suggestion for a human to weigh, never written to REDCap or
+    treated as the chosen value.
+
+    Returns a short string (the model's own reply), or None if Ollama
+    isn't installed/running, the call errors out, or it times out for
+    any reason -- in every one of those cases the run just continues
+    exactly as it would without --ai-assist. This is a strictly
+    additive, best-effort feature, never one that can block or change a
+    run's outcome on its own."""
+    identity_bits = [str(record.get("name") or "").strip(),
+                      str(record.get("street") or "").strip(),
+                      str(record.get("city") or "").strip(),
+                      str(record.get("state") or "").strip()]
+    identity = ", ".join(b for b in identity_bits if b)
+    candidate_list = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(candidates))
+    context = _context_snippet_for_candidates(full_text, candidates)
+    context_part = f"\n\nRelevant text from the organization's website:\n---\n{context}\n---" if context else ""
+    prompt = (
+        f"You are verifying a healthcare organization's {label.lower()} for a facility database.\n"
+        f"Organization: {identity or '(unknown)'}\n"
+        f"Candidate {label.lower()} values found on the organization's OWN website (none matched what's "
+        f"already on file):\n{candidate_list}"
+        f"{context_part}\n\n"
+        f"Which candidate, if any, most likely belongs to THIS organization's own address above? "
+        f"Reply in ONE short sentence: name the candidate exactly as listed (or say NONE), then a brief "
+        f"reason. Do not add anything else."
+    )
+    try:
+        resp = requests.post(
+            _OLLAMA_API_URL,
+            json={"model": model, "prompt": prompt, "stream": False},
+            timeout=_AI_ASSIST_TIMEOUT_SEC,
+        )
+        resp.raise_for_status()
+        text = (resp.json().get("response") or "").strip()
+        return text or None
+    except Exception:
+        return None
+
+
 # Every location THIS run has already created, so a second new location
 # later in the same run -- found via a DIFFERENT parent record -- that
 # turns out to be the exact same place is still caught even though a
@@ -2202,6 +2370,20 @@ def _on_file_display(value):
     return "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value)
 
 
+def _format_ambiguous_field_note(label, candidates):
+    """One "<Label>: multiple candidates found..." note line, with any
+    --ai-assist suggestion (see ai_suggest_candidate) pulled out of the
+    plain candidate list and shown on its own indented line instead of
+    jammed into the same comma-separated clause as the real candidates."""
+    ai_lines = [c for c in candidates if isinstance(c, str) and c.startswith("AI suggestion")]
+    real_candidates = [c for c in candidates if c not in ai_lines]
+    note = (f"{label}: multiple candidates found, could not determine which is correct "
+            f"(website has {', '.join(str(c) for c in real_candidates)})")
+    if ai_lines:
+        note += f"\n  {ai_lines[0]}"
+    return note
+
+
 def build_summary_row(record_id, result, record, updated_redcap=False, dry_run=False,
                        redcap_error=None, redcap_skipped=None):
     """One row per valid (found-in-spreadsheet) record for the run-level
@@ -2333,11 +2515,13 @@ def build_summary_row(record_id, result, record, updated_redcap=False, dry_run=F
         if lines and saw_real_change:
             review_items.append("\n".join(lines))
         for label, candidates in needs_review_details.items():
-            review_items.append(f"{label}: multiple candidates found, could not determine which is correct "
-                                 f"(website has {', '.join(str(c) for c in candidates)})")
+            review_items.append(_format_ambiguous_field_note(label, candidates))
         if result["name_changed"]:
-            review_items.append(f"Facility name: possible name change on the website, never auto-written "
-                                 f"(record has {result['name_old']!r}, site shows {result['name_new']!r})")
+            name_note = (f"Facility name: possible name change on the website, never auto-written "
+                         f"(record has {result['name_old']!r}, site shows {result['name_new']!r})")
+            if result.get("name_ai_hint"):
+                name_note += f"\n  AI suggestion (not auto-applied): {result['name_ai_hint']}"
+            review_items.append(name_note)
         notes = "Manual Review Required:\n" + "\n".join(review_items)
     else:
         note_sections = []
@@ -2352,8 +2536,10 @@ def build_summary_row(record_id, result, record, updated_redcap=False, dry_run=F
             update_label = "Updated:" if (updated_redcap and not dry_run) else "Potential Update:"
             note_sections.append(f"{update_label}\n" + "\n".join(lines))
         if name_changed:
-            note_sections.append(
-                "Manual Review Required: Facility name (possible name change on the website, never auto-written)")
+            name_note = "Manual Review Required: Facility name (possible name change on the website, never auto-written)"
+            if result.get("name_ai_hint"):
+                name_note += f"\n  AI suggestion (not auto-applied): {result['name_ai_hint']}"
+            note_sections.append(name_note)
         if redcap_error:
             note_sections.append(
                 f"Manual Review Required: Failed to update this record in REDCap -- {redcap_error}")
@@ -2442,7 +2628,7 @@ def write_run_workbook(path, summary_rows, other_location_rows, created_location
     wb.save(path)
 
 
-def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
+def verify(record_id, xlsx_path, check_other_locations=True, debug=False, ai_assist=False, ai_model="qwen2.5:7b"):
     record = load_record(xlsx_path, record_id)
     website = _normalize_url(record["website"])
     print(f"Record {record_id}: {record['name']}")
@@ -2628,10 +2814,24 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
             all_addrs.append(p)
     all_addrs = _dedupe_subsumed_addresses(all_addrs)
 
-    parsed_addrs = [
-        a for a in all_addrs
-        if (record_zip and a["zip"][:5] == record_zip) or (record_city and a["city"].upper() == record_city)
-    ]
+    def _matches_record_city_zip(a):
+        return (record_zip and a["zip"][:5] == record_zip) or (record_city and a["city"].upper() == record_city)
+
+    parsed_addrs = [a for a in all_addrs if _matches_record_city_zip(a)]
+    # Addresses for a clearly DIFFERENT city/zip than the record's own are
+    # never candidates for "is this a mismatch/relocation of THIS
+    # record's address" -- they're always potential OTHER locations
+    # instead, regardless of whether the record's own city/zip was ALSO
+    # found elsewhere on the same page. A real case (record 74,
+    # compassionatepsychiatry.org): the record's own Frisco address WAS
+    # confirmed on the page, but a Southlake address and a Plano address
+    # were ALSO on it -- the old logic only ever looked at out-of-city
+    # addresses when the record's own city/zip was found NOWHERE on the
+    # site at all (the "possible relocation" case below), so these two
+    # genuinely different locations were silently discarded instead of
+    # ever surfacing as new-location candidates.
+    out_of_city_addrs = [a for a in all_addrs if not _matches_record_city_zip(a)]
+
     if not parsed_addrs:
         # before concluding the record's address isn't on the page at all,
         # try the looser no-zip confirmation -- some pages just never print
@@ -2646,19 +2846,30 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
     # site DOES have some other clearly-parsed address on it -- most likely
     # the org relocated. Worth surfacing as a candidate rather than just
     # reporting "not found", even though it doesn't match what's on file by
-    # definition (that's the whole point: it's a possible NEW address)
-    relocation_candidates = [] if parsed_addrs else all_addrs
+    # definition (that's the whole point: it's a possible NEW address).
+    # Only ever drawn from out_of_city_addrs now -- when parsed_addrs
+    # ISN'T empty, those same out-of-city addresses are instead always
+    # folded into address_other_locations below (see Bug B fix above),
+    # not treated as a "did we relocate" signal, since the record's own
+    # address was already confirmed and there's no relocation question.
+    relocation_candidates = [] if parsed_addrs else out_of_city_addrs
+    # captured BEFORE the ambiguous-case branch below may reset
+    # parsed_addrs to [] -- otherwise the Bug B merge further down would
+    # never fire for the exact case it was meant to fix (the record's own
+    # address matching MORE than one candidate, same city, on a page that
+    # also has genuinely different-city addresses)
+    had_matching_address = bool(parsed_addrs)
 
-    # More than one candidate address is ambiguous -- there's no way to
-    # tell which one (if any) is really THIS record's, so guessing at a
-    # single "MISMATCH"/"POSSIBLE RELOCATION" would likely be wrong (a
-    # real case: a multi-location org's other branches, sharing the same
-    # city, all got flagged as address mismatches for one specific
-    # record). Route them to the "Other locations" section instead, as
-    # candidate additional locations, and treat the address as
-    # unconfirmed here rather than wrongly "decided". A single candidate
-    # either way is unambiguous and keeps the normal MISMATCH/relocation
-    # handling below.
+    # More than one candidate address matching the record's OWN city/zip
+    # is ambiguous -- there's no way to tell which one (if any) is really
+    # THIS record's, so guessing at a single "MISMATCH"/"POSSIBLE
+    # RELOCATION" would likely be wrong (a real case: a multi-location
+    # org's other branches, sharing the same city, all got flagged as
+    # address mismatches for one specific record). Route them to the
+    # "Other locations" section instead, as candidate additional
+    # locations, and treat the address as unconfirmed here rather than
+    # wrongly "decided". A single candidate either way is unambiguous and
+    # keeps the normal MISMATCH/relocation handling below.
     address_other_locations = []
     if len(parsed_addrs) > 1:
         address_other_locations = parsed_addrs
@@ -2666,6 +2877,8 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
     elif len(relocation_candidates) > 1:
         address_other_locations = relocation_candidates
         relocation_candidates = []
+    if had_matching_address and out_of_city_addrs:
+        address_other_locations = address_other_locations + out_of_city_addrs
     if address_other_locations:
         address_other_locations = [
             {"name": None, "street": a["street"], "city": a["city"], "state": a["state"], "zip": a["zip"],
@@ -2767,10 +2980,8 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
         else:
             print("  ==> NOT FOUND on website")
 
-    own_street_num = street_number(record["street"])
-
     def _not_own_location(loc):
-        return not (loc["street"] and own_street_num and street_number(loc["street"]) == own_street_num)
+        return not (loc["street"] and is_same_location(loc["street"], record["street"]))
 
     # A record on a known doctor-directory domain (see
     # KNOWN_LOCATION_DIRECTORY_DOMAINS) lists hundreds/thousands of OTHER
@@ -3122,13 +3333,56 @@ def verify(record_id, xlsx_path, check_other_locations=True, debug=False):
             needs_review_details["Address"] = [
                 f"site lists a PO Box near this record's city/zip, not a usable street address -- {po_box_hit!r}"
             ]
+
+    # --ai-assist, opt-in only, from here down. Everything above this
+    # point behaves identically whether or not --ai-assist was passed.
+    if ai_assist:
+        # Social isn't in the ambiguity checks above at all today: when a
+        # platform has more than one candidate link, the suggestions/
+        # field_changes loop elsewhere in this function always just uses
+        # the first one -- a reasonable default, kept completely
+        # unchanged when --ai-assist is off. With --ai-assist on, the
+        # user asked for social to get the SAME "don't guess, ask AI"
+        # treatment already applied to phone/fax/email/address, so this
+        # is deliberately gated behind ai_assist rather than a universal
+        # behavior change that would newly block records for everyone.
+        for platform in ("facebook", "instagram", "twitter", "linkedin"):
+            found = all_social.get(platform, [])
+            if len(found) > 1:
+                needs_review.append(platform.capitalize())
+                needs_review_details[platform.capitalize()] = list(found)
+
+        # Ask the model for an opinion on every field that's STILL
+        # ambiguous after all of this script's own deterministic rules
+        # (including the social check just above) -- never for a field
+        # that was already resolved unambiguously.
+        for label in list(needs_review_details.keys()):
+            hint = ai_suggest_candidate(label, record, needs_review_details[label], full_text, ai_model)
+            if hint:
+                needs_review_details[label] = needs_review_details[label] + [
+                    f"AI suggestion (not auto-applied): {hint}"]
+
     name_changed = bool(best_name_match and best_name_match[1] < 0.5)
+
+    # Facility name never auto-applies regardless (see REDCAP_FIELD_MAP's
+    # docstring), so there's no "blocked" state to add here -- this is a
+    # purely advisory hint folded into the existing possible-name-change
+    # note, for when the site itself shows two genuinely DIFFERENT name
+    # signals (e.g. <title> and og:site_name disagree, not just minor
+    # formatting) and a human has to judge which one (if either) is real.
+    name_ai_hint = None
+    if ai_assist and name_changed and site_names and len(site_names) > 1:
+        distinct_values = list(dict.fromkeys(site_names.values()))
+        if len(distinct_values) > 1 and name_similarity(distinct_values[0], distinct_values[1]) < 0.5:
+            name_ai_hint = ai_suggest_candidate(
+                "Organization/Facility name", record, distinct_values, full_text, ai_model)
 
     return {"record_id": record_id, "field_changes": field_changes, "other_locations": other_locations_for_tab,
             "new_location_candidates": new_location_candidates,
             "needs_review": needs_review, "needs_review_details": needs_review_details, "name_changed": name_changed,
             "name_old": record["name"] if name_changed else None,
             "name_new": best_name_match[0] if name_changed else None,
+            "name_ai_hint": name_ai_hint,
             "website_invalid": False}
 
 
@@ -3186,6 +3440,20 @@ def main():
                               "docstring). Off by default: without --apply this ONLY prints what "
                               "would change, exactly like every other mode here, and never touches "
                               "REDCap or the network for writing.")
+    parser.add_argument("--ai-assist", action="store_true",
+                         help="when this script's own rules already found an otherwise-ambiguous field "
+                              "(multiple real candidates on the site, none matching what's on file, for "
+                              "phone/fax/email/address/social) -- or multiple disagreeing name signals -- "
+                              "consult a locally-running Ollama model for an advisory opinion on which "
+                              "candidate is most likely correct. Purely additive: the suggestion is only "
+                              "ever appended to the existing manual-review note for a human to weigh, "
+                              "never auto-applied or written to REDCap. Off by default. Requires Ollama "
+                              "(https://ollama.com) running locally with the model pulled; if it isn't "
+                              "reachable, this is silently skipped and the run proceeds exactly as "
+                              "without --ai-assist.")
+    parser.add_argument("--ai-model", default="qwen2.5:7b",
+                         help="the Ollama model name to use with --ai-assist (default: qwen2.5:7b). "
+                              "Ignored unless --ai-assist is also passed.")
     parser.add_argument("--output-xlsx", default=None,
                          help="path to the single .xlsx workbook this run writes (default: "
                               "<outdir>/summary_<lo>_to_<hi>_redcap_id_<timestamp>.xlsx, "
@@ -3302,7 +3570,8 @@ def main():
         try:
             with contextlib.redirect_stdout(sink):
                 try:
-                    result = verify(record_id, args.input, not args.skip_new_locations, args.debug)
+                    result = verify(record_id, args.input, not args.skip_new_locations, args.debug,
+                                     args.ai_assist, args.ai_model)
                 except Exception as e:
                     # one bad record (any failure besides a missing id,
                     # already handled above) must not take down the rest
@@ -3402,10 +3671,19 @@ def main():
                             for line in lines:
                                 print(f"    {line}")
                         for label, candidates in needs_review_details.items():
-                            print(f"  {label}: multiple candidates found, could not determine which is correct -- {candidates}")
+                            real_candidates = [c for c in candidates
+                                                if not (isinstance(c, str) and c.startswith("AI suggestion"))]
+                            ai_lines = [c for c in candidates
+                                        if isinstance(c, str) and c.startswith("AI suggestion")]
+                            print(f"  {label}: multiple candidates found, could not determine which is correct -- "
+                                  f"{real_candidates}")
+                            for ai_line in ai_lines:
+                                print(f"    {ai_line}")
                         if result["name_changed"]:
                             print(f"  Facility name: possible name change on the website (never auto-written) -- "
                                   f"{result['name_old']!r} -> {result['name_new']!r}")
+                            if result.get("name_ai_hint"):
+                                print(f"    AI suggestion (not auto-applied): {result['name_ai_hint']}")
                     elif field_changes:
                         if not args.apply:
                             print("\n--- Proposed REDCap update (dry-run -- pass --apply to write these) ---")
