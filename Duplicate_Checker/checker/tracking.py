@@ -25,7 +25,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from .checker import RecordResult
+from .checker import PairResult, RecordResult
 from .redcap import PlannedUpdate, describe_changes, plan_updates
 
 SHEET = "Tracking Duplicates"
@@ -64,8 +64,11 @@ def _short(text: str, limit: int = 700) -> str:
 
 
 def build_rows(results: list[RecordResult], run_date: date | None = None,
-               redcap_outcome: list[PlannedUpdate] | None = None) -> list[list]:
+               redcap_outcome: list[PlannedUpdate] | None = None,
+               pairs: list[PairResult] | None = None) -> list[list]:
     """Rows for the tab, in the order of `results` (group order).
+    "records that are not actual duplicates" lists the other records in the group that this record was
+    found NOT to duplicate (from `pairs`; undecided pairs are left out).
     "notes (add to redcap)" is exactly the comment --apply adds to REDCap's Additional Comments (blank for
     records --apply doesn't change); "notes from automation" explains how the app decided.
     `redcap_outcome` (the plans after an --apply run) adds what actually happened in REDCap: records that
@@ -76,6 +79,12 @@ def build_rows(results: list[RecordResult], run_date: date | None = None,
     outcome_by_set: dict[str, list[PlannedUpdate]] = {}
     for p in redcap_outcome or []:
         outcome_by_set.setdefault(p.primary_id, []).append(p)
+    order = {res.record.record_id: i for i, res in enumerate(results)}
+    not_duplicate_of: dict[str, list[str]] = {}
+    for p in pairs or []:
+        if p.verdict == "NOT_DUPLICATE":
+            not_duplicate_of.setdefault(p.a.record_id, []).append(p.b.record_id)
+            not_duplicate_of.setdefault(p.b.record_id, []).append(p.a.record_id)
     rows = []
     for res in results:
         r, rec = res.record, res.recommendation
@@ -102,8 +111,9 @@ def build_rows(results: list[RecordResult], run_date: date | None = None,
             redcap_note, note = _with_redcap_outcome(outcome_by_set[r.record_id], r.record_id, redcap_note,
                                                      note, run_date)
             status = _set_status(outcome_by_set[r.record_id])
-        rows.append([_number(r.record_id), *map(_number, cols), "", "", "", "", "", "", "", validated,
-                     redcap_note, note, status])
+        not_dups = ", ".join(sorted(not_duplicate_of.get(r.record_id, []), key=lambda x: order.get(x, 0)))
+        rows.append([_number(r.record_id), *map(_number, cols), _number(not_dups), "", "", "", "", "", "",
+                     validated, redcap_note, note, status])
     return rows
 
 

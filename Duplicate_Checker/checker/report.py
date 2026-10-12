@@ -115,8 +115,8 @@ def _website_rows(results: list[RecordResult]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _tracking_rows(results: list[RecordResult]) -> pd.DataFrame:
-    return pd.DataFrame(build_tracking_rows(results), columns=TRACKING_HEADERS)
+def _tracking_rows(results: list[RecordResult], pairs: list[PairResult]) -> pd.DataFrame:
+    return pd.DataFrame(build_tracking_rows(results, pairs=pairs), columns=TRACKING_HEADERS)
 
 
 def _summary_rows(results: list[RecordResult], pairs: list[PairResult], settings: dict) -> pd.DataFrame:
@@ -180,7 +180,7 @@ def write_report(path: Path, results: list[RecordResult], pairs: list[PairResult
         "Record Recommendations": _record_rows(results),
         "Pair Comparisons": _pair_rows(pairs),
         "Website Checks": _website_rows(results),
-        "Tracking Duplicates (Draft)": _tracking_rows(results),
+        "Tracking Duplicates (Draft)": _tracking_rows(results, pairs),
     }
     if redcap_plans is not None:
         sheets["REDCap Updates"] = _redcap_rows(redcap_plans, redcap_applied)

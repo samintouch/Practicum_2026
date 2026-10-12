@@ -1,8 +1,8 @@
 """Check duplicate groups from the Comptroller duplicate spreadsheet.
 
 Usage:
-    python -m dup_checker --comptroller-data ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx
-                          --duplicates Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx
+    python -m checker --comptroller-data ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx
+                       --dup Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx
     add --group-ids 81,9 to check only some groups, --apply to update REDCap
 """
 from __future__ import annotations
@@ -24,13 +24,15 @@ from .tracking import build_rows as build_tracking_rows
 from .tracking import write_tracking_tab
 from .website import BrowserRenderer, PageFetcher, WebsiteCheck, check_website, playwright_available
 
+OUTPUT_DIR = Path("output")
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    ap = argparse.ArgumentParser(prog="dup_checker", description="Check whether flagged duplicate records are true duplicates.")
+    ap = argparse.ArgumentParser(prog="checker", description="Check whether flagged duplicate records are true duplicates.")
     ap.add_argument("--comptroller-data", "--data", dest="comptroller_data", type=Path, required=True,
                     help="Comptroller REDCap export with every record's details "
                          "(e.g. ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx)")
-    ap.add_argument("--duplicates", "--groups", dest="duplicates", type=Path, required=True,
+    ap.add_argument("--dup", "--groups", dest="duplicates", type=Path, required=True,
                     help="duplicates workbook: the groups are read from its 'Assigned Duplicate Groups' sheet and "
                          "its 'Tracking Duplicates' tab is filled in (e.g. Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx)")
     ap.add_argument("--sheet", help="sheet with the groups (default: 'Assigned Duplicate Groups')")
@@ -76,7 +78,8 @@ def main(argv: list[str] | None = None) -> int:
         if not path.exists():
             print(f"{label} not found: {path}", file=sys.stderr)
             return 1
-    tracking_out = args.tracking_out or groups_path.with_name(
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    tracking_out = args.tracking_out or OUTPUT_DIR / (
         f"{groups_path.stem}_app_review_{datetime.now():%Y-%m-%d_%H%M}{groups_path.suffix}")
 
     # REDCap is only contacted with --apply; connect up front so a bad token fails before the long run
@@ -196,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{n}/{len(by_group)}] group {gid}: {summary}")
     print(f"Comparisons done in {time.time() - started:.0f}s")
 
-    out = args.out or Path(f"Duplicate_Check_Results_{datetime.now():%Y-%m-%d_%H%M}.xlsx")
+    out = args.out or OUTPUT_DIR / f"Duplicate_Check_Results_{datetime.now():%Y-%m-%d_%H%M}.xlsx"
     settings = {
         "Duplicates workbook": groups_path.name,
         "Comptroller data file": data_path.name,
@@ -209,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     # the Tracking Duplicates tab first - it doesn't depend on REDCap, so a REDCap problem can't lose it
     if not args.no_tracking:
-        rows = build_tracking_rows(all_results)
+        rows = build_tracking_rows(all_results, pairs=all_pairs)
         try:
             write_tracking_tab(groups_path, tracking_out, rows)
             print(f"Tracking Duplicates tab ({len(rows)} rows) saved in: {tracking_out.resolve()}")
@@ -219,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
 
     plans = plan_updates(all_results)
     applied, failure = False, None
-    log = Path(f"REDCap_Update_Log_{datetime.now():%Y-%m-%d_%H%M}.xlsx")
+    log = OUTPUT_DIR / f"REDCap_Update_Log_{datetime.now():%Y-%m-%d_%H%M}.xlsx"
     if redcap is not None:
         try:
             applied = _apply_to_redcap(plans, redcap, redcap_title, log)
@@ -234,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # now that REDCap has been updated (or not), record what happened in the Tracking Duplicates tab
     if redcap is not None and not args.no_tracking and any(p.status != "planned" for p in plans):
-        rows = build_tracking_rows(all_results, redcap_outcome=plans)
+        rows = build_tracking_rows(all_results, redcap_outcome=plans, pairs=all_pairs)
         try:
             write_tracking_tab(groups_path, tracking_out, rows)
             print(f"Tracking Duplicates tab updated with the REDCap results: {tracking_out.resolve()}")

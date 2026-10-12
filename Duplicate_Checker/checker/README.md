@@ -1,4 +1,4 @@
-# dup_checker
+# checker
 
 Checks the possible duplicate groups produced by `Comptroller.R` and suggests, for each
 record, whether it is a true duplicate. It also checks each record's website to see whether
@@ -8,7 +8,7 @@ review, not a final decision.
 ## Requirements
 
 - Python 3.10+ with `pandas`, `openpyxl`, `requests`, `lxml`, `playwright`
-  (`pip install -r dup_checker/requirements.txt`, then `playwright install chromium`)
+  (`pip install -r checker/requirements.txt`, then `playwright install chromium`)
 - Only for `--with-ai`: [Ollama](https://ollama.com) running locally with `qwen2.5:7b`
   (`ollama pull qwen2.5:7b`). Without `--with-ai`, the unclear cases are marked "Manual review required".
 - Optional: Playwright's Chromium browser. Without it, websites that block plain downloads are
@@ -18,15 +18,15 @@ Step-by-step setup instructions for a new computer are in `../Duplicate_Checker_
 
 ## Running
 
-From the project folder (the one with `Comptroller.R`). Two inputs are required:
+From the `Duplicate_Checker` folder, the one that contains the `checker` folder. Two inputs are required:
 
 | Option | File | Used for |
 |---|---|---|
 | `--comptroller-data` | the Comptroller REDCap export, e.g. `ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx` | each record's name, address, phone and website |
-| `--duplicates` | the duplicates workbook, e.g. `Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx` | the groups to check (its "Assigned Duplicate Groups" sheet). Its "Tracking Duplicates" tab is filled in |
+| `--dup` | the duplicates workbook, e.g. `Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx` | the groups to check (its "Assigned Duplicate Groups" sheet). Its "Tracking Duplicates" tab is filled in |
 
 ```
-python -m dup_checker --comptroller-data ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx --duplicates Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx
+python -m checker --comptroller-data ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx --dup Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx
 ```
 
 Add any of these:
@@ -41,7 +41,7 @@ Add any of these:
 --apply                     record the decisions in REDCap (see below)
 ```
 
-Outputs:
+Outputs (all written to an `output` folder inside the folder you run from; it's created if missing):
 - **`<duplicates file>_app_review_<YYYY-MM-DD_HHMM>.xlsx`**: a copy of the duplicates workbook with the
   Tracking Duplicates tab filled in (see below). Each run makes a new file named with the run's date and
   time. The original file is not changed. To write into the original instead, pass
@@ -52,7 +52,7 @@ Outputs:
 - **`REDCap_Update_Log_<date>_<time>.xlsx`**, the REDCap change log (whenever `--apply` changes REDCap): what was changed, with each
   record's old values so it can be undone.
 
-Run `python -m dup_checker --help` for all options. Nothing is cached between runs: every run visits
+Run `python -m checker --help` for all options. Nothing is cached between runs: every run visits
 the websites and asks the AI fresh. Within one run, a website shared by several records is only
 downloaded once.
 
@@ -66,6 +66,10 @@ Filled in the same layout as manual reviews, one row per record in group order:
 | Duplicate records | *no row of their own; listed on the kept record's row* | | |
 | Not a duplicate | `Not a duplicate` | | |
 | Undecided | `Manual review required - possible duplicate with …` | | |
+
+**"records that are not actual duplicates"** lists the other records in the same group that this
+record was found *not* to duplicate (pairs still undecided are left out). For example, row 1691
+(not a duplicate) shows `237, 185, 310`.
 
 Two notes columns:
 - **"notes (add to redcap)"**: exactly the comment `--apply` adds to REDCap's Additional Comments
@@ -155,8 +159,8 @@ Without `--apply`, nothing is sent to REDCap. The report's **REDCap Updates** sh
 would be changed. With `--apply`:
 
 ```
-python -m dup_checker --comptroller-data <export.xlsx> --duplicates <duplicates.xlsx> --apply          # asks y/n right at the start
-python -m dup_checker --comptroller-data <export.xlsx> --duplicates <duplicates.xlsx> --apply --yes    # no prompt
+python -m checker --comptroller-data <export.xlsx> --dup <duplicates.xlsx> --apply          # asks y/n right at the start
+python -m checker --comptroller-data <export.xlsx> --dup <duplicates.xlsx> --apply --yes    # no prompt
 ```
 
 For every set of records found to be the same facility (e.g. 145 and 5015):
