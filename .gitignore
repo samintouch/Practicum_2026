@@ -1,0 +1,12 @@
+# REDCap API credentials -- never commit these
+redcap_config.py
+redcap-api-examples-python/config.py
+redcap-api-examples-python/config.pyc
+*.pyc
+__pycache__/
+
+# Generated/data files -- not source
+*.pdf
+*.csv
+*.xlsx
+*.docx

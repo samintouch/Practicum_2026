@@ -50,7 +50,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--verify-all-websites", action="store_true",
                     help="check every record's website for address changes, not only the records the rules "
                          "could not settle")
-    ap.add_argument("--with-ai", action="store_true",
+    ap.add_argument("--use-ai", action="store_true",
                     help="use the local AI model (Ollama) to judge the pairs the rules can't settle. Without it, "
                          "those records are marked 'Manual review required'")
     ap.add_argument("--no-ai", action="store_true", help=argparse.SUPPRESS)   # old option; AI is now off by default
@@ -128,17 +128,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     llm = None
-    if args.with_ai and not args.no_ai:
+    if args.use_ai and not args.no_ai:
         llm = OllamaClient(args.ollama_url, args.model)
         problem = llm.check()
         if problem:
-            print(f"AI requested (--with-ai) but not available: {problem}.\n"
+            print(f"AI requested (--use-ai) but not available: {problem}.\n"
                   f"Start Ollama (and run 'ollama pull {args.model}' if the model is missing), or run without "
-                  "--with-ai.", file=sys.stderr)
+                  "--use-ai.", file=sys.stderr)
             return 1
         print(f"AI model        : {args.model} at {args.ollama_url}")
     else:
-        print("AI              : off (add --with-ai to use the local AI model).\n"
+        print("AI              : off (add --use-ai to use the local AI model).\n"
               "                  Without the AI, the app can't judge the pairs its rules can't settle - e.g. the same\n"
               "                  address under different names, or the same name at different addresses - so those\n"
               "                  records are marked 'Manual review required'. It also can't pick an address out of\n"

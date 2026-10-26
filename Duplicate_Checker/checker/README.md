@@ -9,8 +9,8 @@ review, not a final decision.
 
 - Python 3.10+ with `pandas`, `openpyxl`, `requests`, `lxml`, `playwright`
   (`pip install -r checker/requirements.txt`, then `playwright install chromium`)
-- Only for `--with-ai`: [Ollama](https://ollama.com) running locally with `qwen2.5:7b`
-  (`ollama pull qwen2.5:7b`). Without `--with-ai`, the unclear cases are marked "Manual review required".
+- Only for `--use-ai`: [Ollama](https://ollama.com) running locally with `qwen2.5:7b`
+  (`ollama pull qwen2.5:7b`). Without `--use-ai`, the unclear cases are marked "Manual review required".
 - Optional: Playwright's Chromium browser. Without it, websites that block plain downloads are
   reported as unreachable.
 
@@ -32,7 +32,7 @@ python -m checker --comptroller-data ComptrollerProject20_DATA_LABELS_2026-04-16
 Add any of these:
 ```
 --group-ids 81,9            only some groups
---with-ai                   let the local AI judge the pairs the rules can't settle (off by default)
+--use-ai                   let the local AI judge the pairs the rules can't settle (off by default)
 --no-web                    skip websites
 --verify-all-websites       also check addresses of records the rules settled
 --model llama3.1:8b         use a different Ollama model
@@ -118,7 +118,7 @@ show the other record's address (with 3 or fewer addresses on the site), the pai
 **Needs review**. This can mean the facility moved (duplicate), but the full run showed it usually
 means a multi-site organization whose website only lists its main location (not a duplicate).
 
-**3. AI (only with `--with-ai`; qwen2.5:7b by default)** judges what's left. Without `--with-ai`,
+**3. AI (only with `--use-ai`; qwen2.5:7b by default)** judges what's left. Without `--use-ai`,
 these pairs are marked "Manual review required". It gets the comparison results, the website
 findings, and whether one record's website shows the other's address or phone number. Answers
 with confidence below 0.6 become "Needs review".

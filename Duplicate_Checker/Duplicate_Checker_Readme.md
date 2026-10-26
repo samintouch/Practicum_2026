@@ -2,18 +2,217 @@
 
 ## What this is about
 
-The Comptroller project keeps a directory of behavioral health and substance use treatment
-facilities in Texas, stored in REDCap. Over time, some facilities were entered more than
-once, sometimes with a slightly different name, a differently written address, or an old address.
+The Duplicate Checker checks a list of possible duplicate records that was created by another
+program (the `Comptroller.R` script), and works out which records on that list are **true
+duplicates** and which are **not duplicates**. The records come from the Comptroller project's
+directory of behavioral health and substance use treatment facilities in Texas, stored in REDCap,
+where some facilities were entered more than once, sometimes with a slightly different name, a
+differently written address, or an old address.
 
-These duplicates have to be found and marked. Until now, a person did this by hand: comparing each
-pair of suspicious records, visiting websites, and deciding. The Duplicate Checker is a small program
-that does the same job. It follows the steps a careful reviewer would follow, and it hands back the
+Until now, this checking was done by hand: comparing each pair of suspicious records, visiting
+websites, and deciding. The Duplicate Checker does the same job. It follows the steps a careful reviewer would follow, and it hands back the
 cases it cannot settle.
 
 **In short:** the program first rules out records that are clearly *not* duplicates, then confirms
 the ones that clearly *are*, and only then looks more closely at the hard cases. Anything it is not
 sure about is marked **"Manual review required"** for a person to check.
+
+## Setting up a computer to run it
+
+These steps are needed once per computer. The commands are written for Windows PowerShell. A
+computer with at least 16 GB of memory is recommended. A graphics card is not needed, but the AI
+step is faster with one.
+
+1. **Install Python:** The program needs **Python 3.10 or newer**. Only install it if it isn't
+   already on the computer - first check by running:
+
+   `python --version`
+
+   (On macOS and Linux, use `python3 --version`.) If it shows 3.10 or higher, skip to step 2.
+   Otherwise, download and install Python from python.org. On Windows, during installation, tick
+   **"Add python.exe to PATH"**.
+
+   **If R or RStudio is already installed**, Python may already be on the computer too, for example
+   if it was set up for R's Python tools. Check with the command above. The commands in this guide
+   can also be run from the **Terminal** tab in RStudio instead of PowerShell. Either way, the
+   program's packages in step 2 still need to be installed.
+
+2. **Install the program's helper packages.** Open PowerShell in the project folder (the folder
+   that contains `checker`) and run:
+
+   `python -m pip install -r checker/requirements.txt`
+
+   This installs the tools the program uses to read Excel files, visit websites and write the results.
+
+3. **Install Chromium.** In the same window, run:
+
+   `python -m playwright install chromium`
+
+   This downloads Chromium, the open-source version of the Chrome browser. The program uses it
+   in the background, for websites that block automated visits. It does not affect the
+   browser you normally use.
+
+4. **Install the AI assistant** (only needed for `--use-ai`). The AI runs in a free program called
+   **Ollama**, which runs quietly in the background.
+
+   On **macOS** and **Linux**, follow the instructions at https://ollama.com/download. On
+   **Windows**, install it by running this command in PowerShell:
+
+   `irm https://ollama.com/install.ps1 | iex`
+
+   In the same window, run the following command to download the AI model used by this
+   application:
+
+   `ollama pull qwen2.5:7b`
+
+   This is a one-time download of about 5 GB. Running `ollama list` afterwards should show
+   `qwen2.5:7b`. Everything the AI does stays on this computer.
+
+   **To check whether Ollama is running**, open a web browser and go to `http://localhost:11434`
+   (`localhost` is this computer, and `11434` is the port Ollama listens on). If it's running, the
+   page shows a plain message: **"Ollama is running"**. If the page doesn't load at all, Ollama
+   isn't running - start it and try again.
+
+5. **REDCap access** (only needed for `--apply`). See *Connecting to REDCap* below. Without it,
+   the program still checks the duplicates and fills in the Tracking Duplicates tab, but it cannot
+   update REDCap.
+
+## Connecting to REDCap
+
+The program can only update REDCap if it knows the project's **API address** and an **API
+token** (a personal key that works like a password). Both are kept in a small settings file
+called `redcap_config.py` in the project folder:
+
+```
+config = dict(
+    api_url="https://replace-this-with-redcap-server-domain/api/",
+    api_token="REPLACE_WITH_32_CHARACTER_TOKEN",
+)
+```
+
+Replace the two values with your own:
+
+- **api_token:** open the project in REDCap and choose **API** from the left-hand menu (under
+  *Applications*). If you do not have a token yet, request one there; the REDCap administrator
+  may need to approve it. The token is a string of 32 letters and numbers.
+- **api_url:** the REDCap API address, shown on the same API page and in the *API Playground*.
+  It is usually the REDCap website address followed by `/api/`.
+
+Treat the token like a password: do not email it or share the file. Each person should use their
+own token.
+
+The program only contacts REDCap when it is run with `--apply`. Before doing anything else, it
+checks the connection. If the token is wrong or expired, the address is wrong, or the network is
+down, it stops straight away with a message explaining the problem. If REDCap stops responding
+part-way through an update, the program also stops and says which records may have been affected.
+In either case, run the program **without** `--apply` until the problem is fixed. It will still
+check the duplicates and fill in the Tracking Duplicates tab.
+
+## How to run the app
+
+Open PowerShell and change directory (`cd`) into the `Duplicate_Checker` folder first - the one
+that contains the `checker` folder:
+
+```
+cd Duplicate_Checker
+```
+
+Then give the program two files: the **Comptroller data** (the REDCap export with every record's
+details) and the **duplicates workbook** (the groups to check). In the command below, replace the
+two file names with your own:
+
+- **ComptrollerDATA.xlsx** is the data exported from the REDCap Comptroller dataset, with every
+  record's details: name, address, phone and website. For example,
+  `ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx`.
+- **Duplicates.xlsx** is the spreadsheet of possible duplicates generated by the `Comptroller.R`
+  script. The program reads the groups from its "Assigned Duplicate Groups" tab and fills in its
+  "Tracking Duplicates" tab. For example, `Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx`.
+
+```
+python -m checker --data ComptrollerDATA.xlsx --dup Duplicates.xlsx --use-ai --apply
+```
+
+With `--use-ai` the AI assistant helps with the hard cases, and with `--apply` the decisions are
+recorded in REDCap. Both are optional. Without `--apply` the program runs as a **dry run**: it fills in the
+Tracking Duplicates tab but does not change REDCap at all.
+Leave out `--use-ai` to run on rules and website checks alone.
+
+The program shows its progress as it goes. It saves a copy of the duplicates workbook, in the
+`output` folder, with the **Tracking Duplicates** tab filled in. The copy's name ends in
+`_app_review_` followed by the date and time of the run, for example
+`..._app_review_2026-10-08_1415.xlsx`, so each run keeps its own file. The original workbook is not
+changed. When the run also updates REDCap (`--apply`), it also saves the **REDCap change log**
+(`REDCap_Update_Log_<date>_<time>.xlsx`) in `output`. It lists every record that was changed, with
+its old values, so any change can be undone.
+
+Useful additions to the command:
+
+| Add | What it does |
+|---|---|
+| `--use-ai` | Uses the AI assistant for the hard cases. Without it, those are marked "Manual review required". |
+| `--group-ids 81,9` | Checks only the listed groups. Good for a quick test. |
+| `--debug` | Also saves a detailed results workbook, in the `output` folder, showing every comparison and website check. |
+| `--apply` | Also records the decisions in REDCap. Right after starting, the program shows which REDCap project it will update and asks **Continue? (y/n)**. After a **y**, it runs to the end without asking again and lists every change it makes. Needs `redcap_config.py` (see above). |
+
+Without `--use-ai`, a run takes a few minutes. With `--use-ai`, it takes roughly 30 to 60 minutes
+for a few hundred groups. Every run starts fresh: it visits the websites again and asks the AI again,
+so the results always reflect what the websites show on the day of the run.
+
+## What the checker folder contains
+
+The program itself is the `checker` folder. Each file has one job:
+
+| File | What it does |
+|---|---|
+| `__init__.py` | Marks the folder as a Python package so it can be run with `python -m checker`. It is empty on purpose. |
+| `__main__.py` | The starting point. It reads the command options and runs the steps in order. |
+| `data.py` | Reads the Comptroller data file and the duplicates workbook, and matches the records by Record ID. |
+| `address.py` | Puts addresses into one standard format and compares them; also finds addresses in website text. |
+| `matching.py` | Compares organization names and phone numbers, and spots names that belong to an individual provider. |
+| `checker.py` | Makes the decisions: applies the rules, the website check and the AI, then groups duplicates and picks the record to keep. |
+| `website.py` | Visits each needed website (using Chromium when a site blocks plain downloads) and checks the address shown there. |
+| `llm.py` | Sends the hard cases to the local AI assistant (Ollama) and reads its answers. |
+| `redcap.py` | Connects to REDCap and records the decisions (only with `--apply`), with all the safety checks. |
+| `tracking.py` | Fills in the Tracking Duplicates tab, including the status column and the notes. |
+| `report.py` | Writes the detailed results workbook (`--debug`) and the REDCap change log. |
+| `requirements.txt` | The list of Python packages installed in setup step 2. |
+| `README.md` | Technical notes for whoever maintains the program. |
+
+## What the program produces
+
+- **The "Tracking Duplicates" tab**, in a copy of the duplicates workbook, filled in the same
+  layout used for manual reviews. Each true duplicate is listed on the row of the record being kept.
+  - **"records that are not actual duplicates"** lists the other records in the group that were
+    found **not** to be duplicates of that record.
+  - **"notes (add to redcap)"** holds the note that goes into REDCap.
+  - **"notes from automation"** explains the decision, and whether it came from a rule check or
+    the AI review.
+  - **"status"** is a colored column: **Not Duplicate** (grey) for records that are not
+    duplicates, and **need review** (orange) for records a person still has to decide. After a
+    REDCap update, it also shows **updated** (green), **skipped** (yellow) or **failed** (red) for
+    each set of duplicates.
+- **A detailed results workbook** (only when asked for with `--debug`), showing every record's
+  result, every pair that was compared, and what was found on each website.
+
+**REDCap is never changed automatically.** Only when the person running it explicitly asks, and
+answers **y** when the program asks at the start, does it record its decisions in REDCap:
+
+- each **duplicate record** gets "Is this a duplicate record?" = **Yes**, and the note
+  "By automation: duplicate with 145" (the record kept) in "Additional Comments";
+- the **record kept** gets "Is this a duplicate record?" = **No**, and the note
+  "By automation: duplicate with 5015" (its duplicates);
+- both are marked **Validation = Yes** with **today's date** as the Validation Date.
+
+The new note goes at the top of "Additional Comments". Any comment already there is kept
+underneath it, after a line showing the record's previous validation date.
+
+It never overrides a decision a reviewer has already entered. Records that REDCap already shows
+the same way are left alone. If a reviewer marked any record in the set differently, the whole set
+is left alone.
+
+Afterwards, the Tracking Duplicates tab shows what happened. Records that were not updated, for
+example because REDCap already had the same answer, are explained in the "notes (add to redcap)"
+column. Records that were updated are listed in the "notes from automation" column.
 
 ## How it works: finding the possible duplicates
 
@@ -106,15 +305,32 @@ looked up. Some websites block automated visits, or only show their address afte
 fully loaded. For those, the program opens the page in a hidden web browser, the same way a person
 would. In testing, this recovered about 1 in 5 websites that could not be read otherwise.
 
-## Step 6: Ask an AI assistant about what is left (optional)
+**Why AI for the address itself (with `--use-ai`):** when a page's address doesn't follow a
+standard, easily-matched pattern, the program asks the same local AI assistant (qwen2.5:7b) to read
+the page text and pick out the street address, since a small language model handles the many
+different ways real sites phrase or format an address far better than fixed text patterns can. Its
+answer is still checked against the page itself before being trusted - the house number and street
+name have to actually appear on the page - so the AI can suggest an address but never invent one.
+This isn't used for email or phone numbers, which the program always finds with plain pattern
+matching, not AI.
 
-This step only runs when the program is started with the `--with-ai` option. Without it, the
+## Step 6: Ask an AI assistant about what is left (optional but highly recommended)
+
+This step only runs when the program is started with the `--use-ai` option. Without it, the
 hard cases that remain are simply marked **"Manual review required"**, and the program runs on
 rules and website checks alone.
 
-With `--with-ai`, the hard cases that remain are given to an **AI assistant** (a language model called
-*qwen2.5*). The AI runs entirely on the local computer, so no facility data is sent to any outside
-AI service.
+With `--use-ai`, the hard cases that remain are given to an **AI assistant** (a language model called
+*qwen2.5*, specifically the `qwen2.5:7b` size). The AI runs entirely on the local computer, so no
+facility data is sent to any outside AI service.
+
+**Why this model:** it's small enough to run at a reasonable speed on an ordinary laptop's CPU
+alone, with no graphics card needed, while still being capable enough for the kind of judgment
+calls this step requires - deciding whether two differently-named or differently-addressed records
+likely refer to the same facility, not just matching text patterns. It was tested directly against
+real, previously-unresolved ambiguous cases from this project's own data (not just generic
+benchmarks) and consistently gave correct, well-reasoned answers, at a manageable one-time download
+size (about 5 GB) - which is what settled it over a smaller or larger alternative.
 
 The AI does not look anything up by itself. It receives a short summary of the evidence from the
 earlier steps (both records' names, addresses and phone numbers, whether the addresses match,
@@ -151,57 +367,12 @@ Every record then ends up in one of three places:
 | **Not a duplicate** | A different facility, or a different location of the same organization. |
 | **Manual review required** | The evidence is unclear. A person should decide. |
 
-## What the program produces
-
-- **The "Tracking Duplicates" tab**, in a copy of the duplicates workbook, filled in the same
-  layout used for manual reviews. Each true duplicate is listed on the row of the record being kept.
-  - **"records that are not actual duplicates"** lists the other records in the group that were
-    found **not** to be duplicates of that record.
-  - **"notes (add to redcap)"** holds the note that goes into REDCap.
-  - **"notes from automation"** explains the decision, and whether it came from a rule check or
-    the AI review.
-  - **"status"** is a colored column: **Not Duplicate** (grey) for records that are not
-    duplicates, and **need review** (orange) for records a person still has to decide. After a
-    REDCap update, it also shows **updated** (green), **skipped** (yellow) or **failed** (red) for
-    each set of duplicates.
-- **A detailed results workbook** (only when asked for with `--debug`), showing every record's
-  result, every pair that was compared, and what was found on each website.
-
-**REDCap is never changed automatically.** Only when the person running it explicitly asks, and
-answers **y** when the program asks at the start, does it record its decisions in REDCap:
-
-- each **duplicate record** gets "Is this a duplicate record?" = **Yes**, and the note
-  "By automation: duplicate with 145" (the record kept) in "Additional Comments";
-- the **record kept** gets "Is this a duplicate record?" = **No**, and the note
-  "By automation: duplicate with 5015" (its duplicates);
-- both are marked **Validation = Yes** with **today's date** as the Validation Date.
-
-The new note goes at the top of "Additional Comments". Any comment already there is kept
-underneath it, after a line showing the record's previous validation date.
-
-It never overrides a decision a reviewer has already entered. Records that REDCap already shows
-the same way are left alone. If a reviewer marked any record in the set differently, the whole set
-is left alone.
-
-Afterwards, the Tracking Duplicates tab shows what happened. Records that were not updated, for
-example because REDCap already had the same answer, are explained in the "notes (add to redcap)"
-column. Records that were updated are listed in the "notes from automation" column.
-
-**The REDCap change log.** Every time the program changes REDCap, it also saves a file named
-`REDCap_Update_Log_<date>_<time>.xlsx` in the `output` folder, for example
-`REDCap_Update_Log_2026-10-08_1651.xlsx`. It lists every record the program planned to change and
-whether it was **updated**, **skipped** or **failed**, with the reason. It also records each
-record's **old values**: the duplicate answer, validation, validation date and comments as they
-were before the change. The file is saved before anything is sent to REDCap, so even an update
-that is interrupted can be checked and, if needed, undone by hand from these old values. Keep it
-together with the review file.
-
 ## How well it works
 
 The program was tested on 60 groups (140 records) that had already been reviewed by hand. Of
 these, 76 records had a manual decision to compare against:
 
-| | Without the AI | With the AI (`--with-ai`) |
+| | Without the AI | With the AI (`--use-ai`) |
 |---|---|---|
 | Records the program decided | 50 | 71 |
 | Agreed with the manual review | **all 50 (100%)** | **67 of 71 (94%)** |
@@ -233,137 +404,3 @@ of the records, instead of all of them.
 
 **The program is a first pass that does most of the routine sorting. The final decision on unclear
 cases stays with a person.**
-
-## Setting up a computer to run it
-
-These steps are needed once per computer. The commands are written for Windows PowerShell. A
-computer with at least 16 GB of memory is recommended. A graphics card is not needed, but the AI
-step is faster with one.
-
-1. **Install Python:** The program needs **Python 3.10 or newer**. Only install it if it isn't
-   already on the computer - first check by running:
-
-   `python --version`
-
-   (On macOS and Linux, use `python3 --version`.) If it shows 3.10 or higher, skip to step 2.
-   Otherwise, download and install Python from python.org. On Windows, during installation, tick
-   **"Add python.exe to PATH"**.
-
-   **If R or RStudio is already installed**, Python may already be on the computer too, for example
-   if it was set up for R's Python tools. Check with the command above. The commands in this guide
-   can also be run from the **Terminal** tab in RStudio instead of PowerShell. Either way, the
-   program's packages in step 2 still need to be installed.
-
-2. **Install the program's helper packages.** Open PowerShell in the project folder (the folder
-   that contains `checker`) and run:
-
-   `python -m pip install -r checker\requirements.txt`
-
-   This installs the tools the program uses to read Excel files, visit websites and write the results.
-
-3. **Install Chromium.** In the same window, run:
-
-   `python -m playwright install chromium`
-
-   This downloads Chromium, the open-source version of the Chrome browser. The program uses it
-   in the background, for websites that block automated visits. It does not affect the
-   browser you normally use.
-
-4. **Install the AI assistant** (only needed for `--with-ai`). The AI runs in a free program called
-   **Ollama**, which runs quietly in the background.
-
-   On **macOS** and **Linux**, follow the instructions at https://ollama.com/download. On
-   **Windows**, install it by running this command in PowerShell:
-
-   `irm https://ollama.com/install.ps1 | iex`
-
-   Then download the AI model by running:
-
-   `ollama pull qwen2.5:7b`
-
-   This is a one-time download of about 5 GB. Running `ollama list` afterwards should show
-   `qwen2.5:7b`. Everything the AI does stays on this computer.
-
-   **To check whether Ollama is running**, open a web browser and go to `http://localhost:11434`
-   (`localhost` is this computer, and `11434` is the port Ollama listens on). If it's running, the
-   page shows a plain message: **"Ollama is running"**. If the page doesn't load at all, Ollama
-   isn't running - start it and try again.
-
-5. **REDCap access** (only needed for `--apply`). See *Connecting to REDCap* below. Without it,
-   the program still checks the duplicates and fills in the Tracking Duplicates tab, but it cannot
-   update REDCap.
-
-## Connecting to REDCap
-
-The program can only update REDCap if it knows the project's **API address** and an **API
-token** (a personal key that works like a password). Both are kept in a small settings file
-called `redcap_config.py` in the project folder:
-
-`config = dict(api_url="https://your-redcap-server/api/", api_token="YOUR_32_CHARACTER_TOKEN")`
-
-Replace the two values with your own:
-
-- **api_token:** open the project in REDCap and choose **API** from the left-hand menu (under
-  *Applications*). If you do not have a token yet, request one there; the REDCap administrator
-  may need to approve it. The token is a string of 32 letters and numbers.
-- **api_url:** the REDCap API address, shown on the same API page and in the *API Playground*.
-  It is usually the REDCap website address followed by `/api/`.
-
-Treat the token like a password: do not email it or share the file. Each person should use their
-own token.
-
-The program only contacts REDCap when it is run with `--apply`. Before doing anything else, it
-checks the connection. If the token is wrong or expired, the address is wrong, or the network is
-down, it stops straight away with a message explaining the problem. If REDCap stops responding
-part-way through an update, the program also stops and says which records may have been affected.
-In either case, run the program **without** `--apply` until the problem is fixed. It will still
-check the duplicates and fill in the Tracking Duplicates tab.
-
-## Running it
-
-Open PowerShell and change directory (`cd`) into the `Duplicate_Checker` folder first - the one
-that contains the `checker` folder:
-
-```
-cd Duplicate_Checker
-```
-
-Then give the program two files: the **Comptroller data** (the REDCap export with every record's
-details) and the **duplicates workbook** (the groups to check):
-
-```
-python -m checker --data ComptrollerDATA.xlsx --dup Duplicates.xlsx --with-ai --apply
-```
-
-Replace the two file names with your own:
-
-- **ComptrollerDATA.xlsx** is the data exported from the REDCap Comptroller dataset, with every
-  record's details: name, address, phone and website. For example,
-  `ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx`.
-- **Duplicates.xlsx** is the spreadsheet of possible duplicates generated by the `Comptroller.R`
-  script. The program reads the groups from its "Assigned Duplicate Groups" tab and fills in its
-  "Tracking Duplicates" tab. For example, `Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx`.
-
-With `--with-ai` the AI assistant helps with the hard cases, and with `--apply` the decisions are
-recorded in REDCap. Both are optional. Leave out `--apply` to only fill in the Tracking Duplicates
-tab without touching REDCap, and leave out `--with-ai` to run on rules and website checks alone.
-
-The program shows its progress as it goes. It saves a copy of the duplicates workbook, in the
-`output` folder, with the **Tracking Duplicates** tab filled in. The copy's name ends in
-`_app_review_` followed by the date and time of the run, for example
-`..._app_review_2026-10-08_1415.xlsx`, so each run keeps its own file. The original workbook is not
-changed. When the run also updates REDCap (`--apply`), it saves the **REDCap change log**
-(`REDCap_Update_Log_<date>_<time>.xlsx`, see above), also in `output`, as well.
-
-Useful additions to the command:
-
-| Add | What it does |
-|---|---|
-| `--with-ai` | Uses the AI assistant for the hard cases. Without it, those are marked "Manual review required". |
-| `--group-ids 81,9` | Checks only the listed groups. Good for a quick test. |
-| `--debug` | Also saves a detailed results workbook, in the `output` folder, showing every comparison and website check. |
-| `--apply` | Also records the decisions in REDCap. Right after starting, the program shows which REDCap project it will update and asks **Continue? (y/n)**. After a **y**, it runs to the end without asking again and lists every change it makes. Needs `redcap_config.py` (see above). |
-
-Without `--with-ai`, a run takes a few minutes. With `--with-ai`, it takes roughly 30 to 60 minutes
-for a few hundred groups. Every run starts fresh: it visits the websites again and asks the AI again,
-so the results always reflect what the websites show on the day of the run.
