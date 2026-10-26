@@ -1,0 +1,133 @@
+── Attaching core tidyverse packages ──────────────────────── tidyverse 2.0.0 ──
+✔ dplyr     1.2.1     ✔ readr     2.2.0
+✔ forcats   1.0.1     ✔ stringr   1.6.0
+✔ ggplot2   4.0.3     ✔ tibble    3.3.1
+✔ lubridate 1.9.5     ✔ tidyr     1.3.2
+✔ purrr     1.2.2     
+── Conflicts ────────────────────────────────────────── tidyverse_conflicts() ──
+✖ dplyr::filter() masks stats::filter()
+✖ dplyr::lag()    masks stats::lag()
+ℹ Use the conflicted package (<http://conflicted.r-lib.org/>) to force all conflicts to become errors
+
+Attaching package: 'janitor'
+
+The following objects are masked from 'package:stats':
+
+    chisq.test, fisher.test
+
+
+Attaching package: 'stringdist'
+
+The following object is masked from 'package:tidyr':
+
+    extract
+
+New names:
+• `Other` -> `Other...28`
+• `Other` -> `Other...110`
+• `` -> `...915`
+There were 50 or more warnings (use warnings() to see the first 50)
+# A tibble: 211 × 2
+   n_name                                                   n
+   <chr>                                                <int>
+ 1 positive recovery                                       11
+ 2 cenikor foundation                                      10
+ 3 helen farabee centers                                   10
+ 4 serving children and adults in need                      9
+ 5 south texas rural services                               9
+ 6 <NA>                                                     9
+ 7 advanced pain care                                       8
+ 8 lakes regional mhmr                                      8
+ 9 mesquite treatment                                       8
+10 prevention and recovery                                  8
+11 serenity foundation of texas                             8
+12 turning point                                            8
+13 arise recovery centers of america                        7
+14 adapt programs                                           6
+15 alcohol drug abuse council of deep east texas            6
+16 bluebonnet trails community mhmr                         6
+17 bluebonnet trails community services                     6
+18 dismas charities                                         6
+19 heart of texas hot region mhmr                           6
+20 mhmr of tarrant county                                   6
+21 symetria of texas                                        6
+22 texas treatment services                                 6
+23 tropical texas behavioral                                6
+24 abode treatment                                          5
+25 addiction behavioral services                            5
+26 bay area recovery ltd                                    5
+27 brazos valley council on alcohol and substance abuse     5
+28 career and recovery resources                            5
+29 clearfork academy lp                                     5
+30 clover house                                             5
+31 helping open peoples eyes                                5
+32 medmark treatment centers of texas                       5
+33 phoenix houses of texas                                  5
+34 simply grace                                             5
+35 spindletop                                               5
+36 substance abuse guidance and education                   5
+37 treatment associates of victoria                         5
+38 central texas mhmr                                       4
+39 community services                                       4
+40 denton county mhmr                                       4
+41 emergence network                                        4
+42 homeward bound                                           4
+43 integral care                                            4
+44 patton house                                             4
+45 permian basin community centers for mhmr                 4
+46 plainview serenity                                       4
+47 recovery council of southeast texas                      4
+48 toxicology associates                                    4
+49 ut southwestern                                          4
+50 volunteers of america texas                              4
+# ℹ 161 more rows
+[1] 851
+[1] "Unchecked" "Checked"  
+# A tibble: 2,710 × 3
+   record_id organization_facility_name                       completeness_score
+       <dbl> <chr>                                                         <dbl>
+ 1      3343 INTEGRAL CAREOUTPATIENT DETOX                                  17.0
+ 2      3284 STARCARE SPECIALTY HEALTH SYSTEM                               16.3
+ 3      3351 STAGES OF RECOVERY INC ABILENE                                 16.2
+ 4      3350 STAGES OF RECOVERY INC WACO                                    16.0
+ 5      3292 CENIKOR FOUNDATION                                             15.2
+ 6      3277 BE WELL ALPHA HOME                                             14.6
+ 7      2175 BEHAVIORAL HEALTH SOLUTIONS OF SOUTH TEXAS                     14.4
+ 8      2188 BEHAVIORAL HEALTH SOLUTIONS OF SOUTH TEXAS                     14.4
+ 9      3325 EMERGENCE HEALTH NETWORK                                       14.4
+10      2184 BEHAVIORAL HEALTH SOLUTIONS OF SOUTH TEXAS                     14.4
+11      2311 THE SPRINGBOARD CENTER                                         14.4
+12      1780 MHMR OF TARRANT COUNTY - The Campus (Youth Reco…               14.2
+13      1781 MHMR OF TARRANT COUNTY - Central Center (Penn)                 14.2
+14      1782 MHMR OF TARRANT COUNTY - Northwest Center                      14.2
+15      1791 MHMR OF TARRANT COUNTY - West Center (Western H…               14.2
+16      1792 MHMR OF TARRANT COUNTY                                         14.2
+17      1802 MHMR OF TARRANT COUNTY - North Center (Mid Citi…               14.2
+18      3288 CENIKOR FOUNDATION                                             14.1
+19      3305 TROPICAL TEXAS BEHAVIORAL HEALTH                               14.0
+20      3335 INTEGRAL CARE                                                  14.0
+21      1903 POSITIVE RECOVERY LLC                                          13.9
+22      1950 ARISE RECOVERY CENTERS OF AMERICA LLC                          13.8
+23      3249 HELEN FARABEE CENTERS                                          13.8
+24      1938 ARISE RECOVERY CENTERS OF AMERICA LLC                          13.8
+25      1997 ARISE RECOVERY CENTERS OF AMERICA LLC                          13.8
+# ℹ 2,685 more rows
+
+--- Record-level summary ---
+# A tibble: 2 × 2
+  review_needed     n
+  <chr>         <int>
+1 NO             2628
+2 YES              82
+
+Distinct duplicate_group_id groups flagged for review:
+[1] 40
+
+Group sizes among flagged groups:
+# A tibble: 2 × 2
+  duplicate_group_size     n
+                 <int> <int>
+1                    2    76
+2                    3     6
+
+Wrote Comptroller_R_duplicates_fixed_andmatch.csv ( 82 records, 40 groups )

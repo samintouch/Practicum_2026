@@ -1,0 +1,274 @@
+library(tidyverse)
+library(janitor)
+library(readxl)
+library(stringr)
+library(stringdist)
+library(openxlsx)
+
+Comptroller <- read_excel("ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx") |>
+  clean_names()
+
+#clean blank and NA values
+Comptroller <- Comptroller |>
+  mutate(across(where(is.character),
+      ~ str_squish(.x))) |>
+  mutate(across(where(is.character),
+      ~ if_else(str_to_lower(.x) %in% c("", "n/a", "na"), NA_character_, .x)))
+
+#normalize facility names
+#NOTE: patterns use \\b word boundaries -- without them, str_replace_all would
+#also strip these substrings out of unrelated words (e.g. "clinic" matching
+#inside a longer word), silently corrupting names it wasn't meant to touch.
+normalize_name <- function(x) {
+  x |>
+    str_to_lower() |>
+    str_replace_all(c(
+      "\\bllc\\b" = "", "\\bpllc\\b" = "", "\\bplc\\b" = "", "\\binc\\b" = "",
+      "\\bclinic\\b" = "", "\\bcenter\\b" = "", "\\bhealthcare\\b" = "",
+      "\\bhealth\\b" = "", "\\bmedical\\b" = "")) |>
+    str_replace_all("[^a-z0-9 ]", "") |>
+    str_squish()
+}
+
+#normalize addresses
+#NOTE: expanded vs. the original (which only handled street/road/avenue/
+#boulevard/suite) to also cover directionals and other common suffixes --
+#otherwise e.g. "West Parker Road" and "W Parker Rd" score as less similar
+#than they should, working against the fuzzy match this pipeline relies on.
+normalize_addr <- function(x) {
+  x |>
+    str_to_lower() |>
+    str_replace_all(c(
+      "\\bstreet\\b" = "st", "\\broad\\b" = "rd", "\\bavenue\\b" = "ave",
+      "\\bboulevard\\b" = "blvd", "\\bsuite\\b" = "ste", "\\bdrive\\b" = "dr",
+      "\\blane\\b" = "ln", "\\bcourt\\b" = "ct", "\\bparkway\\b" = "pkwy",
+      "\\bexpressway\\b" = "expy", "\\bfreeway\\b" = "fwy", "\\bhighway\\b" = "hwy",
+      "\\bplace\\b" = "pl", "\\bcircle\\b" = "cir", "\\bbuilding\\b" = "bldg",
+      "\\bfloor\\b" = "fl",
+      "\\bnorth\\b" = "n", "\\bsouth\\b" = "s", "\\beast\\b" = "e", "\\bwest\\b" = "w")) |>
+    str_replace_all("[^a-z0-9 ]", "") |>
+    str_squish()
+}
+
+#house number: the part of an address that actually distinguishes one
+#building from another. Jaro-Winkler similarity on the full address string
+#barely penalizes a different house number when the rest of the street text
+#is identical (e.g. "12870 Hillcrest Rd" vs "12700 Hillcrest Rd" still scores
+#>= 0.90), which was the single biggest source of false-positive groups --
+#genuinely different businesses on the same street. Requiring an exact match
+#on this field, IN ADDITION TO the string-similarity score, closes that gap.
+extract_house_number <- function(x) {
+  str_extract(x, "^[0-9]+")
+}
+
+#create normalized matching fields
+Comptroller <- Comptroller |>
+  mutate(
+    n_name    = normalize_name(organization_facility_name),
+    n_street  = normalize_addr(organization_street_name),
+    n_house   = extract_house_number(n_street),
+    n_city    = str_to_lower(organization_city_name),
+    n_state   = str_to_lower(organization_state),
+    n_mstreet = normalize_addr(organization_mailing_address),
+    n_mstate  = str_to_lower(organization_mailing_state))
+
+Comptroller |>
+  count(n_name, sort = TRUE) |>
+  filter(n > 1) |>
+  print(n = 50)
+
+#identify checkbox columns
+checkbox_cols <- names(Comptroller)[str_detect(names(Comptroller), "choice")]
+
+length(checkbox_cols)
+
+Comptroller |>
+  select(all_of(checkbox_cols)) |>
+  unlist() |>
+  unique()
+
+#completeness score
+Comptroller <- Comptroller |>
+  mutate(
+    completeness_score =
+      rowSums(!is.na(pick(
+        organization_facility_name,
+        organization_street_name,
+        organization_city_name,
+        organization_state,
+        organization_zip_code))) +
+      rowSums(!is.na(pick(
+        organization_mailing_address,
+        organization_mailing_state,
+        organization_mailing_zip_code))) +
+      rowSums(!is.na(pick(
+        contains("phone"),
+        contains("email"),
+        contains("website"),
+        contains("facebook"),
+        contains("instagram"),
+        contains("twitter"),
+        contains("linkedin"),
+        contains("youtube")))) * 0.5 +
+      rowSums(pick(all_of(checkbox_cols)) == "Checked", na.rm = TRUE) * 0.05)
+
+Comptroller |>
+  select(record_id, organization_facility_name, completeness_score) |>
+  arrange(desc(completeness_score)) |>
+  print(n = 25)
+
+#initialize duplicate grouping variables
+Comptroller$duplicate_group_id <- NA_integer_
+Comptroller$duplicate_reason   <- NA_character_
+
+gid <- 1
+
+#PERFORMANCE: same_city was already a hard requirement for a match in the
+#original code (both branches of the OR needed it) -- so a record can only
+#ever match others in the same city+state, yet the original loop still ran
+#a string-similarity comparison against every OTHER row nationwide before
+#checking that. Blocking by (city, state) up front and only comparing within
+#each block cuts the O(n^2) full scan down to the sum of (block size)^2,
+#with zero change in which pairs are eligible to match. Within each block,
+#the same_sim scores are computed as a single vectorized matrix (stringdist's
+#stringdistmatrix) instead of one scalar stringsim() call per pair -- far
+#less R-level function-call overhead for the same comparisons.
+#
+#Records with a missing city or state can never match anyone (same_city
+#would be FALSE against every other row, same as before), so they're each
+#given their own singleton group without running any comparisons at all.
+no_city <- is.na(Comptroller$n_city) | is.na(Comptroller$n_state)
+for (idx in which(no_city)) {
+  Comptroller$duplicate_group_id[idx] <- gid
+  gid <- gid + 1
+}
+
+blockable_idx <- which(!no_city)
+blocks <- split(blockable_idx,
+                 paste(Comptroller$n_city[blockable_idx], Comptroller$n_state[blockable_idx]))
+
+for (block_idx in blocks) {
+  n <- length(block_idx)
+  if (n == 1) {
+    Comptroller$duplicate_group_id[block_idx] <- gid
+    gid <- gid + 1
+    next
+  }
+
+  names_b  <- Comptroller$n_name[block_idx]
+  street_b <- Comptroller$n_street[block_idx]
+  house_b  <- Comptroller$n_house[block_idx]
+
+  #for the "jw" method, distance is already normalized to [0, 1], so
+  #similarity = 1 - distance (this is exactly what stringsim() does
+  #internally for this method) -- computed here as a full matrix in one call
+  #instead of nrow(block)^2 individual stringsim() calls.
+  name_sim_mat <- 1 - as.matrix(stringdistmatrix(names_b, names_b, method = "jw"))
+  phys_sim_mat <- 1 - as.matrix(stringdistmatrix(street_b, street_b, method = "jw"))
+  name_sim_mat[is.na(name_sim_mat)] <- 0
+  phys_sim_mat[is.na(phys_sim_mat)] <- 0
+
+  house_match_mat <- outer(house_b, house_b, `==`)
+  house_match_mat[is.na(house_match_mat)] <- FALSE
+
+  local_gid    <- rep(NA_integer_, n)
+  local_reason <- rep(NA_character_, n)
+
+  for (i in seq_len(n)) {
+    if (!is.na(local_gid[i])) next
+    local_gid[i] <- gid
+    for (j in seq_len(n)) {
+      if (i == j || !is.na(local_gid[j])) next
+
+      name_match <- name_sim_mat[i, j] >= 0.90
+      #FIX: physical-address match now also requires the house number itself
+      #to match exactly -- a high string-similarity score alone (e.g. same
+      #street name, different house number) is not enough. This was the
+      #main source of false-positive groups (unrelated businesses on the
+      #same street getting clustered together).
+      phys_match <- phys_sim_mat[i, j] >= 0.90 && house_match_mat[i, j]
+
+      #FIX (option A): require BOTH name AND address to match, not either
+      #alone. The previous OR let a shared name across different physical
+      #locations (e.g. the same health system's name at 3 different
+      #campuses in the same city) group records that aren't the same
+      #facility. Only "Name + Physical Address" is left as a match reason,
+      #since it's now the only way a pair can group.
+      if (name_match && phys_match) {
+        local_gid[j] <- gid
+        local_reason[j] <- "Name + Physical Address"
+      }
+    }
+    gid <- gid + 1
+  }
+
+  Comptroller$duplicate_group_id[block_idx] <- local_gid
+  Comptroller$duplicate_reason[block_idx]   <- local_reason
+}
+
+Comptroller <- Comptroller |>
+  group_by(duplicate_group_id) |>
+  mutate(
+    duplicate_group_size = n(),
+    recommended_primary_record = if_else(
+      completeness_score == max(completeness_score, na.rm = TRUE),
+      "YES", "NO"),
+    review_needed = if_else(duplicate_group_size > 1, "YES", "NO")) |>
+  ungroup()
+
+Comptroller <- Comptroller |>
+  group_by(duplicate_group_id) |>
+  mutate(
+    duplicate_reason = if_else(
+      review_needed == "YES",
+      paste(unique(na.omit(duplicate_reason)), collapse = "; "),
+      NA_character_)) |>
+  ungroup()
+
+possible_duplicates <- Comptroller |>
+  filter(review_needed == "YES") |>
+  arrange(duplicate_group_id, desc(completeness_score))
+
+possible_duplicates_review <- possible_duplicates |>
+  select(
+    duplicate_group_id,
+    duplicate_group_size,
+    record_id,
+    organization_facility_name,
+    organization_street_name,
+    organization_city_name,
+    organization_state,
+    organization_zip_code,
+    organization_mailing_address,
+    organization_mailing_state,
+    organization_mailing_zip_code,
+    duplicate_reason,
+    completeness_score,
+    recommended_primary_record,
+    review_needed) |>
+  arrange(duplicate_group_id, desc(completeness_score))
+
+unique_records <- Comptroller |>
+  filter(review_needed == "NO")
+
+cat("\n--- Record-level summary ---\n")
+Comptroller |>
+  count(review_needed) |>
+  print()
+
+cat("\nDistinct duplicate_group_id groups flagged for review:\n")
+Comptroller |>
+  filter(review_needed == "YES") |>
+  distinct(duplicate_group_id) |>
+  nrow() |>
+  print()
+
+cat("\nGroup sizes among flagged groups:\n")
+Comptroller |>
+  filter(review_needed == "YES") |>
+  count(duplicate_group_size, sort = TRUE) |>
+  print()
+
+write.csv(possible_duplicates_review, "Comptroller_R_duplicates_fixed_andmatch.csv", row.names = FALSE)
+cat("\nWrote Comptroller_R_duplicates_fixed_andmatch.csv (", nrow(possible_duplicates_review), "records,",
+    n_distinct(possible_duplicates_review$duplicate_group_id), "groups )\n")
