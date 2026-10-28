@@ -194,7 +194,7 @@ def _finish_pair(p: PairResult, web: dict[str, WebsiteCheck], llm: OllamaClient 
     if llm is None:
         _decide(p, "UNSURE", 0.0, "-",
                 f"The rules can't settle this pair ({p.name_level.lower()} names, address {p.address_level.lower()}"
-                f"{', same phone' if p.phone_match else ''}). Review manually, or run with --use-ai for an AI "
+                f"{', same phone' if p.phone_match else ''}). Review manually, or drop --no-ai for an AI "
                 f"suggestion.")
         return
     answer = llm.judge_pair(_evidence(p, web))

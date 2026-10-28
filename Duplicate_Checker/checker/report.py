@@ -24,10 +24,10 @@ FILLS = {
     "SUITE_DIFFERS": PatternFill("solid", fgColor="FFEB9C"),
     "UNREACHABLE": PatternFill("solid", fgColor="D9D9D9"),
     "updated": PatternFill("solid", fgColor="C6EFCE"),
-    "partly updated": PatternFill("solid", fgColor="C6EFCE"),
-    "need review": PatternFill("solid", fgColor="F4B183"),
-    "Not Duplicate": PatternFill("solid", fgColor="E7E6E6"),
-    "skipped": PatternFill("solid", fgColor="FFEB9C"),
+    "no update required": PatternFill("solid", fgColor="FFEB9C"),
+    "Manual Review Required": PatternFill("solid", fgColor="F4B183"),
+    "Not Duplicate": PatternFill("solid", fgColor="D9D2E9"),
+    "skipped": PatternFill("solid", fgColor="E7E6E6"),
     "failed": PatternFill("solid", fgColor="F8CBAD"),
 }
 
@@ -166,11 +166,42 @@ def _redcap_rows(plans: list, applied: bool) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def write_redcap_log(path: Path, plans: list) -> None:
-    """What --apply changed in REDCap, with each record's old values (for undo)."""
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        _redcap_rows(plans, applied=True).to_excel(writer, sheet_name="REDCap Updates", index=False)
-    _style(path)
+REDCAP_SHEET = "REDCap Updates"
+
+
+def add_redcap_sheet(path: Path, plans: list) -> None:
+    """Add (or replace) the "REDCap Updates" sheet in the app-review workbook at `path`, right after
+    "Tracking Duplicates": what --apply changed in REDCap, with each record's old values - the only
+    record of those, so a live REDCap change can be undone."""
+    df = _redcap_rows(plans, applied=True)
+    wb = load_workbook(path)
+    if REDCAP_SHEET in wb.sheetnames:
+        del wb[REDCAP_SHEET]
+    index = wb.sheetnames.index("Tracking Duplicates") + 1 if "Tracking Duplicates" in wb.sheetnames else len(wb.sheetnames)
+    ws = wb.create_sheet(REDCAP_SHEET, index=index)
+    for j, col in enumerate(df.columns, start=1):
+        ws.cell(row=1, column=j, value=col)
+    for i, row in enumerate(df.itertuples(index=False), start=2):
+        for j, value in enumerate(row, start=1):
+            ws.cell(row=i, column=j, value=value)
+    wide = {"comment_to_add", "old_comments", "note"}
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="D9E1F2")
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+    for col in ws.iter_cols(min_row=1):
+        header = str(col[0].value or "")
+        longest = max((len(str(c.value)) for c in col if c.value is not None), default=10)
+        width = 60 if header in wide else min(max(longest, len(header) * 0.6, 10) + 2, 45)
+        ws.column_dimensions[col[0].column_letter].width = width
+        for c in col[1:]:
+            c.alignment = Alignment(wrap_text=width >= 45, vertical="top")
+            if header == "status" and c.value in FILLS:
+                c.fill = FILLS[str(c.value)]
+    ws.freeze_panes = "A2"
+    if ws.max_row > 1:
+        ws.auto_filter.ref = ws.dimensions
+    wb.save(path)
 
 
 def write_report(path: Path, results: list[RecordResult], pairs: list[PairResult], settings: dict,

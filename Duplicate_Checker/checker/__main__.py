@@ -1,7 +1,7 @@
 """Check duplicate groups from the Comptroller duplicate spreadsheet.
 
 Usage:
-    python -m checker --comptroller-data ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx
+    python -m checker --data ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx
                        --dup Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx
     add --group-ids 81,9 to check only some groups, --apply to update REDCap
 """
@@ -14,46 +14,38 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-from .checker import check_group, prescreen_group, records_needing_websites
-from .data import build_records, load_groups, load_source
-from .llm import OllamaClient
-from .redcap import (RedcapClient, RedcapError, apply_updates, check_against_redcap,
-                     plan_updates)
-from .report import write_redcap_log, write_report
-from .tracking import build_rows as build_tracking_rows
-from .tracking import write_tracking_tab
-from .website import BrowserRenderer, PageFetcher, WebsiteCheck, check_website, playwright_available
+# the rest of the app's modules (pandas, openpyxl, requests, playwright under the hood) are imported
+# inside main(), after the "Please wait" message - those libraries alone take a couple of seconds to
+# load, and importing them up here would delay that message by the same amount, every run.
 
 OUTPUT_DIR = Path("output")
+REDCAP_CONFIG = Path("redcap_config.py")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="checker", description="Check whether flagged duplicate records are true duplicates.")
-    ap.add_argument("--comptroller-data", "--data", dest="comptroller_data", type=Path, required=True,
-                    help="Comptroller REDCap export with every record's details "
+    ap.add_argument("--data", "--comptroller-data", dest="comptroller_data", type=Path, required=True,
+                    help="Comptroller REDCap export with every record's details, as .xlsx or .csv "
                          "(e.g. ComptrollerProject20_DATA_LABELS_2026-04-16_1051.xlsx)")
     ap.add_argument("--dup", "--groups", dest="duplicates", type=Path, required=True,
                     help="duplicates workbook: the groups are read from its 'Assigned Duplicate Groups' sheet and "
                          "its 'Tracking Duplicates' tab is filled in (e.g. Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx)")
-    ap.add_argument("--sheet", help="sheet with the groups (default: 'Assigned Duplicate Groups')")
-    ap.add_argument("--tracking-out", type=Path,
-                    help="where to save the duplicates workbook with the filled-in Tracking Duplicates tab "
-                         "(default: a copy named <duplicates file>_app_review_<date>_<time>.xlsx; give the duplicates file itself "
-                         "to update it in place - a backup is made first)")
-    ap.add_argument("--no-tracking", action="store_true", help="don't write the Tracking Duplicates tab")
     ap.add_argument("--debug", action="store_true",
                     help="also save the detailed results workbook (every record, every pair compared, every "
                          "website check) as Duplicate_Check_Results_<timestamp>.xlsx")
     ap.add_argument("--out", type=Path, help="with --debug: name of the results workbook")
     ap.add_argument("--group-ids", help="only check these group IDs, comma separated (e.g. 81,9)")
+    ap.add_argument("--limit", type=int,
+                    help="only process the first N records across all groups - handy for a quick test run "
+                         "(e.g. --limit 20). A group left with just one record after the cut is dropped, "
+                         "since there's nothing left to compare it against")
     ap.add_argument("--no-web", action="store_true", help="skip the website checks")
     ap.add_argument("--verify-all-websites", action="store_true",
                     help="check every record's website for address changes, not only the records the rules "
                          "could not settle")
-    ap.add_argument("--use-ai", action="store_true",
-                    help="use the local AI model (Ollama) to judge the pairs the rules can't settle. Without it, "
-                         "those records are marked 'Manual review required'")
-    ap.add_argument("--no-ai", action="store_true", help=argparse.SUPPRESS)   # old option; AI is now off by default
+    ap.add_argument("--no-ai", action="store_true",
+                    help="skip the local AI model (Ollama). By default the app uses it to judge the pairs the "
+                         "rules can't settle; with --no-ai, those are marked 'Manual review required' instead")
     ap.add_argument("--model", default="qwen2.5:7b", help="Ollama model (default: qwen2.5:7b)")
     ap.add_argument("--ollama-url", default="http://localhost:11434", help="Ollama server URL")
     ap.add_argument("--workers", type=int, default=8, help="websites fetched in parallel (default: 8)")
@@ -65,32 +57,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="record the decisions in REDCap (duplicate Yes/No, validation, a note in Additional "
                          "Comments). Without this flag REDCap is not contacted at all.")
     ap.add_argument("--yes", action="store_true", help="with --apply: don't ask the y/n question at the start")
-    ap.add_argument("--redcap-config", type=Path, default=Path("redcap_config.py"),
-                    help="file with api_url/api_token (default: redcap_config.py; or set REDCAP_API_URL "
-                         "and REDCAP_API_TOKEN)")
     return ap.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     groups_path, data_path = args.duplicates, args.comptroller_data
+    print(f"Please wait, processing: {data_path.name}", flush=True)
+
+    from .checker import check_group, prescreen_group, records_needing_websites
+    from .data import build_records, load_groups, load_source
+    from .llm import OllamaClient
+    from .redcap import RedcapClient, RedcapError, plan_updates
+    from .report import add_redcap_sheet, write_report
+    from .tracking import build_rows as build_tracking_rows
+    from .tracking import write_tracking_tab
+    from .website import BrowserRenderer, PageFetcher, WebsiteCheck, check_website, normalize_url, playwright_available
+
     for label, path in (("Duplicates workbook", groups_path), ("Comptroller data file", data_path)):
         if not path.exists():
             print(f"{label} not found: {path}", file=sys.stderr)
             return 1
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    tracking_out = args.tracking_out or OUTPUT_DIR / (
-        f"{groups_path.stem}_app_review_{datetime.now():%Y-%m-%d_%H%M}{groups_path.suffix}")
+    tracking_out = OUTPUT_DIR / f"{groups_path.stem}_app_review_{datetime.now():%Y-%m-%d_%H%M}{groups_path.suffix}"
 
     # REDCap is only contacted with --apply; connect up front so a bad token fails before the long run
     redcap, redcap_title = None, ""
     if args.apply:
         try:
-            redcap = RedcapClient.from_config(args.redcap_config)
+            redcap = RedcapClient.from_config(REDCAP_CONFIG)
             redcap_title = redcap.project_title()
             redcap.check_fields()
         except RedcapError as exc:
-            _redcap_failed(exc, args.redcap_config, during="connect")
+            _redcap_failed(exc, REDCAP_CONFIG, during="connect")
             return 2
         print(f"REDCap          : {redcap_title}")
         if not args.yes:
@@ -112,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Duplicates      : {groups_path.name}")
     print(f"Comptroller Data: {data_path.name}")
-    groups = load_groups(groups_path, args.sheet)
+    groups = load_groups(groups_path, None)
     source = load_source(data_path)
     by_group = build_records(groups, source)
     if args.group_ids:
@@ -122,27 +121,39 @@ def main(argv: list[str] | None = None) -> int:
         if missing:
             print(f"Group IDs not in the file: {', '.join(sorted(missing))}")
     by_group = {g: recs for g, recs in by_group.items() if len(recs) > 1}
+    if args.limit is not None:
+        limited: dict[str, list] = {}
+        total = 0
+        for g, recs in by_group.items():
+            if total >= args.limit:
+                break
+            take = recs[:args.limit - total]
+            if len(take) > 1:              # a lone leftover record has nothing left to compare it against
+                limited[g] = take
+                total += len(take)
+        by_group = limited
     records = [r for recs in by_group.values() for r in recs]
     print(f"Checking {len(by_group)} groups / {len(records)} records")
     if not by_group:
         return 1
 
     llm = None
-    if args.use_ai and not args.no_ai:
-        llm = OllamaClient(args.ollama_url, args.model)
-        problem = llm.check()
-        if problem:
-            print(f"AI requested (--use-ai) but not available: {problem}.\n"
-                  f"Start Ollama (and run 'ollama pull {args.model}' if the model is missing), or run without "
-                  "--use-ai.", file=sys.stderr)
-            return 1
-        print(f"AI model        : {args.model} at {args.ollama_url}")
-    else:
-        print("AI              : off (add --use-ai to use the local AI model).\n"
+    if args.no_ai:
+        print("AI              : off (--no-ai).\n"
               "                  Without the AI, the app can't judge the pairs its rules can't settle - e.g. the same\n"
               "                  address under different names, or the same name at different addresses - so those\n"
               "                  records are marked 'Manual review required'. It also can't pick an address out of\n"
               "                  website text that doesn't follow the usual address pattern.")
+    else:
+        llm = OllamaClient(args.ollama_url, args.model)
+        problem = llm.check()
+        if problem:
+            llm = None
+            print(f"AI              : off - not available ({problem}).\n"
+                  f"                  Start Ollama (and run 'ollama pull {args.model}' if the model is missing) to "
+                  "enable it, or add\n                  --no-ai to continue quietly without it.", file=sys.stderr)
+        else:
+            print(f"AI model        : {args.model} at {args.ollama_url}")
 
     # stage 1: rules on name/address/phone - no network, no AI
     prescreened = {gid: prescreen_group(gid, recs) for gid, recs in by_group.items()}
@@ -173,9 +184,13 @@ def main(argv: list[str] | None = None) -> int:
         started = time.time()
         print(f"Checking websites for {sum(1 for r in to_check if r.website)} records "
               f"({sum(1 for r in records if r.website)} have a URL)...")
+        def _visit(r):
+            print(f"  record {r.record_id}: {normalize_url(r.website) or r.website}")
+            return check_website(r, fetcher, llm)
+
         try:
             with ThreadPoolExecutor(max_workers=args.workers) as pool:
-                for check in pool.map(lambda r: check_website(r, fetcher, llm), to_check):
+                for check in pool.map(_visit, to_check):
                     web[check.record_id] = check
         finally:
             if browser:
@@ -203,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = {
         "Duplicates workbook": groups_path.name,
         "Comptroller data file": data_path.name,
-        "Tracking Duplicates tab written to": "off" if args.no_tracking else tracking_out.name,
+        "Tracking Duplicates tab written to": tracking_out.name,
         "AI model": args.model if llm else "off",
         "Website checks": "off" if args.no_web else ("all records" if args.verify_all_websites
                                                        else "only records the rules could not settle"),
@@ -211,21 +226,19 @@ def main(argv: list[str] | None = None) -> int:
         "Group filter": args.group_ids or "all",
     }
     # the Tracking Duplicates tab first - it doesn't depend on REDCap, so a REDCap problem can't lose it
-    if not args.no_tracking:
-        rows = build_tracking_rows(all_results, pairs=all_pairs)
-        try:
-            write_tracking_tab(groups_path, tracking_out, rows)
-            print(f"Tracking Duplicates tab ({len(rows)} rows) saved in: {tracking_out.resolve()}")
-        except PermissionError:
-            print(f"Could not save {tracking_out.name} - close it in Excel and run again.", file=sys.stderr)
-            return 1
+    rows = build_tracking_rows(all_results, pairs=all_pairs)
+    try:
+        write_tracking_tab(groups_path, tracking_out, rows)
+        print(f"Tracking Duplicates tab ({len(rows)} rows) saved in: {tracking_out.resolve()}")
+    except PermissionError:
+        print(f"Could not save {tracking_out.name} - close it in Excel and run again.", file=sys.stderr)
+        return 1
 
     plans = plan_updates(all_results)
     applied, failure = False, None
-    log = OUTPUT_DIR / f"REDCap_Update_Log_{datetime.now():%Y-%m-%d_%H%M}.xlsx"
     if redcap is not None:
         try:
-            applied = _apply_to_redcap(plans, redcap, redcap_title, log)
+            applied = _apply_to_redcap(plans, redcap, redcap_title)
         except RedcapError as exc:
             failure = exc
         settings["REDCap"] = f"{redcap_title} - " + (
@@ -236,24 +249,31 @@ def main(argv: list[str] | None = None) -> int:
         settings["REDCap"] = "not contacted (run with --apply to record the decisions)"
 
     # now that REDCap has been updated (or not), record what happened in the Tracking Duplicates tab
-    if redcap is not None and not args.no_tracking and any(p.status != "planned" for p in plans):
+    if redcap is not None and any(p.status != "planned" for p in plans):
         rows = build_tracking_rows(all_results, redcap_outcome=plans, pairs=all_pairs)
         try:
             write_tracking_tab(groups_path, tracking_out, rows)
             print(f"Tracking Duplicates tab updated with the REDCap results: {tracking_out.resolve()}")
         except PermissionError:
             print(f"Could not add the REDCap results to {tracking_out.name} (it is open in Excel). They are "
-                  f"in the REDCap change log instead.", file=sys.stderr)
+                  f"in the REDCap Updates tab instead.", file=sys.stderr)
+    if redcap is not None and plans:
+        try:
+            add_redcap_sheet(tracking_out, plans)
+            print(f"REDCap Updates tab (old values, for undo) added to: {tracking_out.resolve()}")
+        except PermissionError:
+            print(f"Could not add the REDCap Updates tab to {tracking_out.name} - close it in Excel and run "
+                  "again.", file=sys.stderr)
     if args.debug:
         write_report(out, all_results, all_pairs, settings, redcap_plans=plans, redcap_applied=applied or bool(failure))
         print(f"Results (debug): {out.resolve()}")
     if failure:
-        _redcap_failed(failure, args.redcap_config, during="update", log=log if log.exists() else None)
+        _redcap_failed(failure, REDCAP_CONFIG, during="update", tracking_out=tracking_out)
         return 2
     return 0
 
 
-def _redcap_failed(exc: Exception, config_path: Path, during: str, log: Path | None = None) -> None:
+def _redcap_failed(exc: Exception, config_path: Path, during: str, tracking_out: Path | None = None) -> None:
     """Explain a REDCap problem and how to carry on without it."""
     lines = ["", "=" * 78]
     if during == "connect":
@@ -262,9 +282,10 @@ def _redcap_failed(exc: Exception, config_path: Path, during: str, log: Path | N
     else:
         lines += [f"Updating REDCap failed: {exc}.",
                   "The run stopped here. The Tracking Duplicates tab was already saved."]
-        if log:
-            lines += [f"Records that may have been changed, with their old values (for undo), are in:",
-                      f"  {log.resolve()}"]
+        if tracking_out:
+            lines += ["Records that may have been changed, with their old values (for undo), are in the "
+                      "'REDCap Updates' tab of:",
+                      f"  {tracking_out.resolve()}"]
     lines += [f"Check the REDCap address and API token in {config_path} (see Duplicate_Checker_Readme.md),",
               "and the network/VPN connection. Until this is resolved, run the app WITHOUT --apply:",
               "it still checks the duplicates and fills in the Tracking Duplicates tab.",
@@ -272,9 +293,10 @@ def _redcap_failed(exc: Exception, config_path: Path, during: str, log: Path | N
     print("\n".join(lines), file=sys.stderr)
 
 
-def _apply_to_redcap(plans, client: RedcapClient, title: str, log: Path) -> bool:
+def _apply_to_redcap(plans, client: RedcapClient, title: str) -> bool:
     """Check the planned changes against live REDCap data, then write (the user confirmed at the start).
     Returns True if it wrote. Any REDCap problem raises RedcapError so the run stops."""
+    from .redcap import apply_updates, check_against_redcap
     if not plans:
         print("REDCap: no duplicates found, so nothing to record.")
         return False
@@ -289,17 +311,11 @@ def _apply_to_redcap(plans, client: RedcapClient, title: str, log: Path) -> bool
         print("Nothing to update - REDCap already matches.")
         apply_updates(plans, client)          # marks the skips
         return True
-    # save the old values before sending anything, so even an interrupted update can be undone
     for p in todo:
         p.status = "sending"
-    write_redcap_log(log, plans)
-    try:
-        apply_updates(plans, client)
-    finally:
-        write_redcap_log(log, plans)          # final status of every record
+    apply_updates(plans, client)
     print(f"REDCap: {sum(p.status == 'updated' for p in plans)} updated, "
           f"{sum(p.status == 'skipped' for p in plans)} skipped")
-    print(f"REDCap change log (old values, for undo): {log.resolve()}")
     return True
 
 

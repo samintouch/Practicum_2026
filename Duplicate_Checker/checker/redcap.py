@@ -2,21 +2,24 @@
 
 For every set of records the checker found to be the same facility:
   - each duplicate record (the "which is true duplicate?" IDs, e.g. 5015):
-        duplicate = Yes, comment "duplicate with 145"
+        duplicate = Yes, comment "From automation: duplicate with 145"
   - the record kept (the most complete record, e.g. 145):
-        duplicate = No, comment "duplicate with 5015"
+        duplicate = No, comment "From automation: \nId: 5015 is duplicate of Id: 145"
   - both: Validation = Yes and Validation Date = today
-The comment goes at the top of "Additional Comments". An existing comment is kept below it, after a
-"Previous Comment: <old validation date>" line.
+The comment goes at the top of "Additional Comments". An existing comment is never overwritten -
+it's kept below the new one, after a "Previous note: <old validation date>" line, so both the new
+and the old note exist together as a history.
 Records the checker called "Not a duplicate" or "Needs review" are not touched.
+
+The checker's decision always wins over a conflicting one already in REDCap: an earlier reviewer
+having set "duplicate" the other way never stops the update. The only time nothing is sent is when
+REDCap already shows exactly what the checker found - there is nothing to change, so the record is
+left as "no update required" rather than re-sent.
 
 Safety checks against the live REDCap data before anything is written:
   - the record must exist
-  - a record already marked the same way in REDCap (duplicate Yes/No) is left alone entirely
-  - a duplicate record a reviewer already set to "No", or a kept record a reviewer already marked
-    as a duplicate, is not overridden - either conflict skips the whole set, so REDCap never says
-    "duplicate of 145" while 145 itself is marked a duplicate
   - skipped if the organization name in REDCap no longer resembles the name the checker used
+    (the record may have changed since the export was taken)
 Every change is logged with the old values so it can be undone.
 """
 from __future__ import annotations
@@ -177,13 +180,16 @@ def plan_updates(results: list[RecordResult], run_date: date | None = None) -> l
             plans.append(PlannedUpdate(
                 record_id=rid, primary_id=res.primary_id or "", role="duplicate",
                 organization_name=res.record.name or "", decided_by=res.decided_by,
-                comment_to_add=f"By automation: duplicate with {res.primary_id}",   # 5015: "...duplicate with 145"
+                comment_to_add=f"From automation: duplicate with {res.primary_id}",   # 5015: "...duplicate with 145"
                 set_duplicate=YES, validation_date=f"{run_date:%Y-%m-%d}"))
         elif res.recommendation.startswith("Duplicate - keep"):
+            ids = ", ".join(res.duplicate_with)
+            verb = "is" if len(res.duplicate_with) == 1 else "are"
             plans.append(PlannedUpdate(
                 record_id=rid, primary_id=rid, role="kept",
                 organization_name=res.record.name or "", decided_by=res.decided_by,
-                comment_to_add=f"By automation: duplicate with {', '.join(res.duplicate_with)}",   # 145: "...with 5015"
+                # 145: "From automation: \nId: 5015 is duplicate of Id: 145"
+                comment_to_add=f"From automation: \nId: {ids} {verb} duplicate of Id: {rid}",
                 set_duplicate=NO, validation_date=f"{run_date:%Y-%m-%d}"))
     return plans
 
@@ -208,12 +214,6 @@ def check_against_redcap(plans: list[PlannedUpdate], client: RedcapClient) -> No
             p.action, p.note = "SKIP", (f"name in REDCap is now '{p.redcap_name}' - record changed since the "
                                         "export; re-check before marking")
             conflicts.setdefault(p.primary_id, f"record {p.record_id} has changed in REDCap")
-        elif p.old_duplicate and p.old_duplicate != p.set_duplicate:
-            p.action = "SKIP"
-            p.note = (f"a reviewer already set 'duplicate' to {YES_NO[p.old_duplicate]} in REDCap - "
-                      f"not overriding")
-            conflicts.setdefault(p.primary_id, f"record {p.record_id} is already marked "
-                                               f"'{YES_NO[p.old_duplicate]}' in REDCap")
 
     for p in plans:
         if p.primary_id in conflicts and p.action != "SKIP":
@@ -221,8 +221,10 @@ def check_against_redcap(plans: list[PlannedUpdate], client: RedcapClient) -> No
         if p.action == "SKIP":
             continue
         if p.old_duplicate == p.set_duplicate:
-            p.action, p.note = "SKIP", (f"already marked '{YES_NO[p.old_duplicate]}' in REDCap, same as found - "
-                                        "no update needed")
+            p.action = "NO_CHANGE"
+            when = f" on {_mdy(p.old_validation_date)}" if p.old_validation_date else ""
+            label = "Duplicate" if p.old_duplicate == YES else "Not Duplicate"
+            p.note = f"already marked {label} in REDCap{when}"
             continue
         p.changes = {
             DUPLICATE_FIELD: p.set_duplicate,
@@ -239,15 +241,16 @@ def _mdy(ymd: str) -> str:
 
 
 def new_comment_text(comment: str, old_comments: str, old_validation_date: str) -> str:
-    """Our comment first; any existing comment kept below it, introduced by the old validation date:
+    """Our comment first; any existing comment is never overwritten - it's kept below ours,
+    introduced by the old validation date, so both exist as a history:
 
-        duplicate with 145
-        Previous Comment: 07-11-2026
+        From automation: duplicate with 145
+        Previous note: 07-11-2026
         <existing comment, unchanged>
     """
     if not old_comments.strip():
         return comment
-    previous = f"Previous Comment: {_mdy(old_validation_date)}".rstrip()
+    previous = f"Previous note: {_mdy(old_validation_date)}".rstrip()
     return f"{comment}\n{previous}\n{old_comments}"
 
 
@@ -263,6 +266,8 @@ def apply_updates(plans: list[PlannedUpdate], client: RedcapClient) -> None:
     for p in plans:
         if p.action == "SKIP":
             p.status = "skipped"
+        elif p.action == "NO_CHANGE":
+            p.status = "no update required"
     if not todo:
         return
     rows = [{"record_id": p.record_id, **p.changes} for p in todo]

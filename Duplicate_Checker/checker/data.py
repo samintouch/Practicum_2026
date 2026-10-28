@@ -115,7 +115,12 @@ def load_groups(path: Path, sheet: str | None) -> pd.DataFrame:
 
 
 def load_source(path: Path) -> pd.DataFrame:
-    df = pd.read_excel(path, dtype=object)
+    """The Comptroller REDCap export - either an .xlsx/.xls workbook or a .csv/.tsv export."""
+    if path.suffix.lower() in (".csv", ".tsv"):
+        sep = "\t" if path.suffix.lower() == ".tsv" else ","
+        df = pd.read_csv(path, dtype=object, sep=sep, encoding="utf-8-sig")
+    else:
+        df = pd.read_excel(path, dtype=object)
     cols = _find_columns(df.columns, SOURCE_COLUMNS)
     if "record_id" not in cols:
         raise SystemExit(f"Could not find a Record ID column in {path.name}")
