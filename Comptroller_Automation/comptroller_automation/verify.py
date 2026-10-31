@@ -23,8 +23,9 @@ from dataclasses import dataclass, field
 from . import county as county_lookup
 from .extract import Found, extract, site_host
 from .fields import ADDRESS_KEYS, MAX_NEW_LOCATIONS, NON_BLOCKING_REVIEW, REPORT_ONLY, SOCIAL_KEYS, TARGET_STATE
-from .locations import (brand_words, clean_name, discover_location_pages, distinct_locations, ineligible_reason,
-                        is_directory_domain, locations_from_pages, looks_like_directory, name_new_locations)
+from .locations import (brand_words, check_names_with_ai, clean_name, discover_location_pages,
+                        distinct_locations, ineligible_reason, is_directory_domain, locations_from_pages,
+                        looks_like_directory, name_new_locations)
 from .normalize import (STATE_NAMES, email_key, format_phone, host, house_number, is_placeholder_social, is_toll_free,
                         name_similarity, phone_digits, same_location, social_key, state_code, street_key, zip5)
 from .scraper import FetchError, fetch_site, is_deep_link
@@ -82,6 +83,7 @@ class RecordResult:
     ai_note: str = ""
     suggestion: object = None   # websearch.Suggestion for a record without a website
     directory: bool = False
+    skipped_locations: int = 0  # new locations left out because there were more than allowed
 
     @property
     def changes(self):
@@ -159,12 +161,12 @@ def _nearest_office(record, locations):
     most half as far as the next one (so the choice is clear-cut)."""
     if len(locations) < 2:
         return None
-    here = county_lookup.geocode(record["street"], record["city"], state_code(record["state"]), zip5(record["zip"]))
+    here = county_lookup.locate(record["street"], record["city"], state_code(record["state"]), zip5(record["zip"]))
     if not here:
         return None
     distances = []
     for loc in locations:
-        there = county_lookup.geocode(loc.street, loc.city, loc.state, loc.zip)
+        there = county_lookup.locate(loc.street, loc.city, loc.state, loc.zip)
         if there:
             distances.append((county_lookup.miles_between(here, there), loc))
     if len(distances) < len(locations):
@@ -210,6 +212,16 @@ def _check_numbers(record, data, locations, own):
         fax = _from_location("fax", record["fax"], own.fax, own, format_phone)
     else:
         fax = _single_value("fax", record["fax"], fax_cands, lambda f: format_phone(f.value), lambda f: f.source)
+        # The only fax on the site is REDCap's phone, and the site never calls
+        # it a phone ("Fax: (844) 705-0129", no phone shown): REDCap has the
+        # fax in the phone field. Add it as the fax.
+        kinds = {f.kind for f in numbers if f.value == final_phone}
+        if fax.status == NOT_FOUND and not on_fax and final_phone and kinds == {"fax"}:
+            source = next(f.source for f in numbers if f.value == final_phone)
+            fax = FieldResult("fax", record["fax"], NEW, new_value=format_phone(final_phone),
+                              found=[format_phone(final_phone)], source=source,
+                              note="the website labels this number as the fax and shows no phone number; "
+                                   "REDCap has it as the phone too, so check the phone")
     return [phone, fax]
 
 
@@ -229,24 +241,43 @@ def _check_email(record, data, locations, own, site):
         result = _single_value("email", record["email"], use, lambda f: f.value, lambda f: f.source)
         result.found = [f.value for f in cands]
     if result.status == CHANGED:
-        # an address missing from the site may still work, so don't replace it
-        result.status, result.note = REVIEW, ("the email on file isn't shown on the website and the website shows "
-                                              "a different one; the old one may still work, so check before replacing")
+        # the website shows one email and it isn't the one on file: use it
+        result.note = "the email on file isn't on the website; the website shows only this one"
     return result
 
 
 # ---------------------------------------------------------------- social media
 
+def _best_social(links, all_links, org_name):
+    """Several profiles for one platform: the one whose handle best matches
+    the facility's name, then the one the site links to most (its header or
+    footer), then a named page before a number-only one ("profile.php?id=")."""
+    def score(f):
+        handle = f.extra["key"].split(":", 1)[1]
+        times_linked = sum(1 for x in all_links if x.extra["key"] == f.extra["key"])
+        return (name_similarity(org_name, handle), times_linked, not handle.isdigit())
+    return max(links, key=score)
+
+
 def _check_socials(record, data):
     results = []
     for platform in SOCIAL_KEYS:
         on_file = record[platform]
-        cands = _distinct([f for f in data.socials if f.kind == platform], lambda f: f.extra["key"])
+        links = [f for f in data.socials if f.kind == platform]
+        cands = _distinct(links, lambda f: f.extra["key"])
         on_key = social_key(on_file, platform)
         if on_key and on_key in {f.extra["key"] for f in cands}:
             results.append(FieldResult(platform, on_file, MATCH))
             continue
-        result = _single_value(platform, on_file, cands, lambda f: f.value, lambda f: f.source)
+        if len(cands) > 1:
+            # several profiles: pick the likeliest instead of asking a person
+            best = _best_social(cands, links, record["name"])
+            result = FieldResult(platform, on_file, CHANGED if on_file else NEW, new_value=best.value,
+                                 found=[f.value for f in cands], source=best.source,
+                                 note=f"the website links to {len(cands)} {platform} pages; this one best matches "
+                                      f"the facility's name or is linked most")
+        else:
+            result = _single_value(platform, on_file, cands, lambda f: f.value, lambda f: f.source)
         if is_placeholder_social(on_key) and result.status == NOT_FOUND:
             result.status, result.note = REVIEW, "REDCap has a website-builder placeholder link, not the facility's"
         results.append(result)
@@ -436,34 +467,60 @@ def _decide(record, data, locations, pages, use_county):
 
 def _drop_hidden_addresses(locations, browser):
     """Websites built from templates sometimes keep an old or sample address
-    in a block the stylesheet hides. Plain HTML can't tell, so when a site
-    seems to list several addresses, check each page's text as a browser
-    shows it and keep only the addresses a visitor can see. schema.org
-    addresses are kept: they are the site's own structured data."""
+    in a block the stylesheet hides, or in stale schema.org data that only
+    search engines read. Plain HTML can't tell, so when a site seems to list
+    several addresses, check each page's text as a browser shows it and keep
+    only the addresses a visitor can see.
+
+    Returns (locations, hidden phones): the phones of dropped addresses that
+    a visitor can't see anywhere either, which should be dropped too."""
+    def page(url):
+        return (url or "").split("#")[0].rstrip("/")     # ".../" and "..." are one page
+
     visible = {}
-    for url in {l.url for l in locations if l.source == "text"}:
+    for url in {page(l.url) for l in locations if l.source in ("text", "schema.org")}:
         try:
             visible[url] = _plain(browser.visible_text(url))
         except Exception:
             visible[url] = None          # couldn't check, keep what was found
+    checked = " ".join(t for t in visible.values() if t)
 
-    def shown(loc):
-        text = visible.get(loc.url)
-        if text is None:
-            return True
+    def shown_in(loc, text):
         words = _plain(loc.street).split()[:2]       # house number and first street word
         return f" {' '.join(words)} " in f" {text} "
+
+    def shown(loc):
+        text = visible.get(page(loc.url))
+        return True if text is None else shown_in(loc, text)
 
     # A page where most addresses are hidden keeps them in collapsed sections
     # a visitor opens with a click (a "Locations" list by state); those are
     # real. Only a stray hidden address next to visible ones is dropped.
     hidden = set()
     for url in visible:
-        on_page = [l for l in locations if l.url == url and l.source == "text"]
+        on_page = [l for l in locations if page(l.url) == url and l.source == "text"]
         page_hidden = [l for l in on_page if not shown(l)]
         if len(page_hidden) <= len(on_page) - len(page_hidden):
             hidden.update(id(l) for l in page_hidden)
-    return [l for l in locations if id(l) not in hidden]
+    # schema.org data is for search engines and can be years out of date: an
+    # address there that no visitor sees, on a site that does show a
+    # different address, is dropped ("12800 Hillcrest Road" behind a page
+    # that shows "5728 LBJ Fwy").
+    # Checked on the schema address's own page: that page must show a
+    # different address as text, and not this one.
+    for loc in locations:
+        page_text = visible.get(page(loc.url))
+        if loc.source != "schema.org" or not page_text or shown_in(loc, checked):
+            continue
+        page_shows_another = any(l.source == "text" and page(l.url) == page(loc.url) and id(l) not in hidden
+                                 and shown_in(l, page_text) for l in locations)
+        if page_shows_another:
+            hidden.add(id(loc))
+
+    visible_digits = re.sub(r"\D", "", checked)
+    hidden_phones = {n for l in locations if id(l) in hidden for n in (l.phone, l.fax)
+                     if n and n not in visible_digits}
+    return [l for l in locations if id(l) not in hidden], hidden_phones
 
 
 def _needs_ai(record, fields):
@@ -492,7 +549,8 @@ def verify_record(record_id, record, opts=None):
 
     data = extract(pages)
     if opts.browser and len(distinct_locations(data.locations)) > 1:
-        data.locations = _drop_hidden_addresses(data.locations, opts.browser)
+        data.locations, hidden_phones = _drop_hidden_addresses(data.locations, opts.browser)
+        data.phones = [f for f in data.phones if f.value not in hidden_phones]
     directory = is_directory_domain(pages[0].url) or is_directory_domain(record["website"])
     location_pages = []
     if opts.find_locations and not directory:
@@ -514,9 +572,10 @@ def verify_record(record_id, record, opts=None):
     if opts.ai and _needs_ai(record, fields):
         # contact pages first, they're most likely to hold the answer
         page_lines = sorted(data.text.items(), key=lambda kv: "contact" not in kv[0].lower())
-        site_type, ai_locations, result.ai_note = opts.ai.extract_locations(record, page_lines)
-        if site_type == "directory_of_unrelated_providers":
-            directory = True
+        # The AI's own "is this a directory?" answer isn't used: it called
+        # Pathways Youth and Family Services, one organization with offices
+        # across Texas, a directory. Directories are judged by the code alone.
+        _, ai_locations, result.ai_note = opts.ai.extract_locations(record, page_lines)
         if ai_locations:
             own_site_locs = distinct_locations(own_site_locs + ai_locations)
             fields, own = _decide(record, data, _in_state(own_site_locs, home_state), pages, opts.use_county)
@@ -580,7 +639,7 @@ def verify_record(record_id, record, opts=None):
     all_locs = _in_state(all_locs, TARGET_STATE)
     brand = next((f.value for f in data.names if f.kind in ("og:site_name", "schema.org")), "")
     result.other_locations, note = _other_locations(record, all_locs, own, fields, directory, site_host(pages),
-                                                    brand)
+                                                    brand, opts.ai)
     if note:
         result.note = f"{result.note}; {note}" if result.note else note
     return result
@@ -603,7 +662,7 @@ def _number_gap(a, b):
     return abs(int(na) - int(nb)) if na and nb else 10 ** 9
 
 
-def _other_locations(record, locations, own, fields, directory, site, brand):
+def _other_locations(record, locations, own, fields, directory, site, brand, ai=None):
     street = next(f for f in fields if f.key == "street")
     zip_field = next(f for f in fields if f.key == "zip")
     mine = [{"street": record["street"], "zip": zip5(record["zip"])}]
@@ -629,13 +688,12 @@ def _other_locations(record, locations, own, fields, directory, site, brand):
     # An unnamed location, or one only labelled by its city ("Wylie Office"),
     # gets "<organization> - <City>". For a deep link the record's own name is
     # one branch's name, so the site's brand is better.
-    others = name_new_locations(others, clean_name(brand) if brand and is_deep_link(record["website"])
-                                else record["name"])
+    parent = clean_name(brand) if brand and is_deep_link(record["website"]) else record["name"]
+    others = name_new_locations(others, parent)
     if not own and street.status not in (NEW, CHANGED):
         return [OtherLocation(l, "this record's own location couldn't be identified on the website, so "
-                                 "its other locations aren't added automatically") for l in others], ""
-    if len(others) > MAX_NEW_LOCATIONS:
-        reason = (f"website lists {len(others)} other locations, more than {MAX_NEW_LOCATIONS}; a list this "
-                  f"long is checked by a person before anything is added")
-        return [OtherLocation(l, reason) for l in others], ""
-    return [OtherLocation(l, ineligible_reason(l)) for l in others], ""
+                                 "these may not be the same organization's offices", note=l.name_note)
+                for l in others], ""
+    if ai and len(others) <= MAX_NEW_LOCATIONS:
+        check_names_with_ai(others, ai, brand or record["name"], parent)
+    return [OtherLocation(l, ineligible_reason(l), note=l.name_note) for l in others], ""

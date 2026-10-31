@@ -38,8 +38,31 @@ class FetchError(Exception):
     pass
 
 
+class BotCheck(FetchError):
+    """The site answered with a bot-check page (Cloudflare "Just a moment...",
+    "Access denied" and the like) instead of its content. The site's owner
+    has chosen to keep automated visitors out, so it isn't retried."""
+
+
+# the whole title is the blocked-page phrase ("403 Forbidden", "Attention
+# Required! | Cloudflare"), so "Forbidden City Dental" doesn't count
+_BOT_CHECK_TITLE = re.compile(r"^\s*(?:error\s*)?(?:\d{3}\s*[-:]?\s*)?(just a moment|attention required|access denied|forbidden|"
+                              r"web page blocked|security check|are you a robot|ddos-guard|"
+                              r"verifying you are human|one more step)[\s.!…]*(?:[|:\-–].*)?$", re.I)
+_BOT_CHECK_BODY = re.compile(r"cf-chl|challenge-platform|cf_chl_opt|/cdn-cgi/challenge|"
+                             r"checking (if the site connection is secure|your browser)", re.I)
+
+
+def _is_bot_check(html):
+    head = html[:20000]
+    title = re.search(r"<title[^>]*>(.*?)</title>", head, re.I | re.S)
+    return bool((title and _BOT_CHECK_TITLE.search(title.group(1))) or _BOT_CHECK_BODY.search(head))
+
+
 def _get(url):
     resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT, allow_redirects=True)
+    if _is_bot_check(resp.text or ""):
+        raise BotCheck(f"{url} answered with a bot-check page")
     resp.raise_for_status()
     if "html" not in resp.headers.get("Content-Type", "html"):
         raise FetchError(f"{url} is not an HTML page")
@@ -127,20 +150,27 @@ def _visible_text_length(html):
 def fetch_page(url, browser=None):
     """Plain request first. If the site refuses it (connection dropped,
     403, 429, 5xx...), retry the page in the browser. A 404/410 is a real
-    missing page and is not retried."""
+    missing page and is not retried, and neither is a bot-check page."""
     try:
         final_url, html = _get(url)
         if browser and browser.render_js and _visible_text_length(html) < _MIN_TEXT_CHARS:
             final_url, html = browser.get(url)
+            if _is_bot_check(html):
+                raise BotCheck(f"{url} answered with a bot-check page")
         return Page(final_url, html)
+    except BotCheck:
+        raise
     except Exception as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
         if browser and status not in (404, 410):
             try:
                 final_url, html = browser.get(url)
-                return Page(final_url, html)
             except Exception:
                 pass
+            else:
+                if _is_bot_check(html):
+                    raise BotCheck(f"{url} answered with a bot-check page") from exc
+                return Page(final_url, html)
         raise FetchError(f"{type(exc).__name__}: {exc}") from exc
 
 

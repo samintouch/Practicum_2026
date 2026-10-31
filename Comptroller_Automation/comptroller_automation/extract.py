@@ -40,6 +40,9 @@ class Location:
     source: str = ""      # schema.org / text / AI
     distance_miles: float = 0.0   # from the address on file, when chosen as the nearest office
     own_page: bool = False        # url is this location's own page, not a list of locations
+    closed: bool = False          # the site marks it closed ("PERMANENTLY CLOSED" next to it)
+    site_name: str = ""           # the name as the website gives it ("" when none)
+    name_note: str = ""           # why the name was changed, for the report
 
     def address(self):
         return {"street": self.street, "city": self.city, "state": self.state, "zip": self.zip}
@@ -227,6 +230,21 @@ def _real_street(street):
 
 _NOT_A_NAME = re.compile(r"^(address|location|locations|visit|visit us|contact|contact us|directions|"
                          r"get directions|office|our office|hours|find us|map|mailing address|phone|fax)\W*$", re.I)
+# Buttons and calls to action written next to an address ("Send us a message")
+_CALL_TO_ACTION = re.compile(r"^(send|call|email|e-mail|text|message|book|schedule|request|make|click|tap|learn|"
+                             r"read|view|see|get|find|visit|contact|follow|join|sign|log|apply|donate|refer|"
+                             r"download|submit|chat|reach|write|let'?s|talk|ask|start)\b", re.I)
+# A status line between a location's name and its address
+_STATUS_LINE = re.compile(r"^(permanently closed|temporarily closed|closed|now closed|coming soon|opening soon|"
+                          r"now open|new location|open now)\W*$", re.I)
+
+
+def _usable_name(candidate):
+    return (len(candidate.split()) <= 8 and not re.search(r"\d", candidate)
+            and not candidate.endswith((".", "!", "?", ":")) and not _NOT_A_NAME.match(candidate)
+            and not _CALL_TO_ACTION.match(candidate)
+            and candidate.upper() not in STATES and candidate.upper() not in STATE_CODES
+            and not re.fullmatch(r"[a-z_]+", candidate))     # icon text like "location_on"
 
 
 def _text_locations(lines, url):
@@ -256,16 +274,19 @@ def _text_locations(lines, url):
                 loc.phone = digits
         email = EMAIL_RE.search(tail)
         loc.email = email.group().lower() if email else ""
-        before = [c.strip() for c in flat[max(0, m.start() - 160):m.start()].split("|") if c.strip()]
+        before = [c.strip() for c in flat[max(0, m.start() - 200):m.start()].split("|") if c.strip()]
+        # A status line ("PERMANENTLY CLOSED") between the name and the address
+        # says something about the location; the name is the line above it.
+        while before and _STATUS_LINE.match(before[-1]):
+            if "closed" in before[-1].lower():
+                loc.closed = True
+            before.pop()
         if before:
             candidate = before[-1]
             # a name wrapped onto two lines: "Northwest Health Center for" / "Women"
             if len(before) > 1 and re.search(r"\b(for|of|and|at|the|in|on)$|[&\-–]$", before[-2], re.I):
                 candidate = f"{before[-2]} {candidate}"
-            if (len(candidate.split()) <= 8 and not re.search(r"\d", candidate)
-                    and not candidate.endswith((".", "!", "?", ":")) and not _NOT_A_NAME.match(candidate)
-                    and candidate.upper() not in STATES and candidate.upper() not in STATE_CODES
-                    and not re.fullmatch(r"[a-z_]+", candidate)):     # icon text like "location_on"
+            if _usable_name(candidate):
                 loc.name = candidate
         found.append(loc)
     return found

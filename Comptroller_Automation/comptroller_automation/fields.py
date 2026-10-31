@@ -31,8 +31,11 @@ SOCIAL_KEYS = ("facebook", "instagram", "twitter", "tiktok", "youtube", "whatsap
 
 # Only locations in this state are added as new records.
 TARGET_STATE = "TX"
-# A site listing more other locations than this (a large chain or a listing
-# site) gets none added automatically; they go to Other Locations for review.
+# A record whose website gives more new locations than this gets none added
+# automatically (and none listed); the record's note says so.
+NEW_LOCATIONS_PER_RECORD = 15
+# Lists longer than this can't be added anyway, so their names aren't sent
+# to the (slow) local AI for checking.
 MAX_NEW_LOCATIONS = 50
 
 # A REVIEW on any field except these blocks every write on that record.

@@ -10,3 +10,6 @@ __pycache__/
 *.csv
 *.xlsx
 *.docx
+
+# Local caches -- regenerated as needed
+Comptroller_Automation/comptroller_automation/cache/

@@ -10,6 +10,7 @@ dropped ("grounding"). That stops a made-up value reaching REDCap.
 import json
 import re
 import threading
+from pathlib import Path
 
 import requests
 
@@ -160,3 +161,73 @@ def _grounded(raw, full_text, url):
     return Location(street=street, city=(raw.get("city") or "").strip(), state=state_code(raw.get("state", "")),
                     zip=zip_code, name=(raw.get("name") or "").strip(), phone=phone, fax=fax, email=email,
                     url=url, source="AI"), dropped
+
+
+NAME_CHECK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reasoning": {"type": "string"},
+        "verdict": {"type": "string", "enum": ["location name", "not a name"]},
+    },
+    "required": ["reasoning", "verdict"],
+}
+# Kept short on purpose: the model reads it for every name, and on a CPU a
+# ~100-token prompt answers in ~5 s against ~16 s for a longer one with examples.
+NAME_CHECK_PROMPT = """Text found above an address on "{org}"'s website: "{name}"
+Is it the name of a clinic, office or facility ("location name"), or other website text such as a button, heading, status or single generic word ("not a name")? Reasoning: under 10 words. Then the verdict."""
+
+# Verdicts are kept between runs, so a name is only ever asked about once.
+NAME_CACHE = Path(__file__).resolve().parent / "cache" / "name_checks.json"
+_cache_lock = threading.Lock()
+_name_verdicts = None
+
+
+def _cached_verdicts():
+    global _name_verdicts
+    if _name_verdicts is None:
+        try:
+            _name_verdicts = json.loads(NAME_CACHE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _name_verdicts = {}
+    return _name_verdicts
+
+
+def _remember(name, is_name):
+    with _cache_lock:
+        cache = _cached_verdicts()
+        cache[name.strip().lower()] = is_name
+        try:
+            NAME_CACHE.parent.mkdir(exist_ok=True)
+            NAME_CACHE.write_text(json.dumps(cache, indent=1, sort_keys=True), encoding="utf-8")
+        except OSError:
+            pass                        # can't save; it'll just be asked again next run
+
+
+def check_location_names(ai, org, names):
+    """Ask the AI, one text at a time, which texts are real location names.
+    Returns {text: True (a location name) / False (not one)}; a text whose
+    check failed is left out, so it stays as it was. (Asked about several
+    at once, the model skipped some or returned an empty list.)"""
+    verdicts = {}
+    for name in names:
+        key = name.strip().lower()
+        known = _cached_verdicts().get(key)
+        if known is None:
+            try:
+                with ai._lock:
+                    resp = requests.post(f"{ai.url}/api/generate", timeout=TIMEOUT, json={
+                        "model": ai.model, "prompt": NAME_CHECK_PROMPT.format(org=org, name=name), "stream": False,
+                        "format": NAME_CHECK_SCHEMA, "think": False,
+                        # room for the short reasoning and the verdict (a lower cap cut answers off)
+                        "options": {"temperature": 0, "num_ctx": 1024, "num_predict": 150},
+                    })
+                resp.raise_for_status()
+                verdict = json.loads(resp.json().get("response") or "{}").get("verdict")
+            except (requests.RequestException, ValueError):
+                continue
+            if verdict not in ("location name", "not a name"):
+                continue
+            known = verdict == "location name"
+            _remember(name, known)
+        verdicts[name] = known
+    return verdicts

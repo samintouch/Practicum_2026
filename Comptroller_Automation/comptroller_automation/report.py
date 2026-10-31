@@ -1,5 +1,5 @@
 """The run's Excel workbook, laid out like the earlier verifier's report:
-Record Summary, Other Locations, New Records Added, plus Field Details."""
+Record Summary, New Records Added, New Records - Failed to add, plus Field Details."""
 
 import math
 import re
@@ -10,6 +10,9 @@ from openpyxl.utils import get_column_letter
 
 from .fields import LABELS, SOCIAL_KEYS
 from .normalize import format_phone
+
+DRY_RUN_NOT_UPDATED = "Dry Run"   # updated_redcap_record in a dry run
+NO_CHANGE = "No Change Required"  # updated_redcap_record when the record is already up to date
 
 SUMMARY_COLUMNS = [
     "redcap_record_id", "facility_name", "updated_redcap_record", "manual_review_required",
@@ -22,8 +25,9 @@ SUMMARY_COLUMNS = [
     "address_changed", "address_old", "address_new",
     "name_changed", "name_old", "name_new",
 ]
+REASON_HEADER = "These new locations are not added because of following reason"
 OTHER_LOCATIONS_COLUMNS = ["record_id", "name", "street", "city", "state", "zip", "phone", "fax", "email",
-                           "url", "found_by", "reason"]
+                           "url", "found_by", "note", REASON_HEADER]
 CREATED_COLUMNS = ["record_id", "new_record_id", "name", "street", "city", "state", "zip", "county",
                    "phone", "fax", "email", "url", "found_by", "note"]
 DETAIL_COLUMNS = ["record_id", "field", "in_redcap", "on_website", "result", "action", "found_by_ai",
@@ -73,6 +77,8 @@ def _held_line(f):
 
 def _fetch_problem(error):
     """A short, plain reason for a website that couldn't be opened."""
+    if "bot-check page" in error:
+        return "the site blocks automated access with a bot check, such as Cloudflare's; open it in a browser"
     if re.search(r"NameResolution|getaddrinfo|Name or service not known", error):
         return "the domain no longer exists"
     status = re.search(r"\b(4\d\d|5\d\d) (?:Client|Server) Error", error)
@@ -127,21 +133,23 @@ def _notes(r, outcome, dry_run, suggest_websites=False):
 def summary_row(r, outcome, dry_run, suggest_websites=False):
     rec = r.record
     written, _ = outcome
+    notes = _notes(r, outcome, dry_run, suggest_websites)
     row = {
         "redcap_record_id": r.record_id,
         "facility_name": rec["name"],
-        "updated_redcap_record": _yn(written),
+        "updated_redcap_record": (NO_CHANGE if notes.startswith("Record up to date")
+                                  else DRY_RUN_NOT_UPDATED if dry_run else _yn(written)),
         "manual_review_required": _yn(r.status in ("no website", "fetch failed") or bool(r.reviews)
                                       or (not dry_run and r.changes and not written)),
-        "found_multiple_locations": _yn(bool(r.other_locations)),
+        "found_multiple_locations": _yn(bool(r.other_locations) or r.skipped_locations > 0),
         "new_records_added": ", ".join(o.new_record_id for o in r.other_locations
                                        if o.new_record_id and not o.new_record_id.startswith("(")),
         "ai_assisted": _yn(bool(r.ai_note)),
         "website_suggested": r.suggestion.url if r.suggestion else "",
-        "website_old": rec["website"], "phone_old": rec["phone"], "fax_old": rec["fax"],
+        "website_old": rec["website"] or "N/A", "phone_old": rec["phone"], "fax_old": rec["fax"],
         "email_old": rec["email"], "name_old": rec["name"],
         "address_old": f"{rec['street']}, {rec['city']}, {rec['state']} {rec['zip']}".strip(", "),
-        "notes": _notes(r, outcome, dry_run, suggest_websites),
+        "notes": notes,
     }
     changes = [] if r.blocked else r.changes
     for category, keys in CATEGORIES.items():
@@ -196,8 +204,9 @@ def _sheet(wb, title, columns, rows, wrap=()):
             width = max([len(col)] + [len(str(r.get(col, "")).split("\n")[0]) for r in rows[:500]])
             ws.column_dimensions[letter].width = min(max(width + 2, 10), 50)
         for cell in ws[letter][1:]:
-            if cell.value in ("Yes", "No"):
-                fill, font = _YES_NO_COLORS[(cell.value, col in _ATTENTION_COLUMNS)]
+            if cell.value in ("Yes", "No", DRY_RUN_NOT_UPDATED, NO_CHANGE):
+                value = "Yes" if cell.value == "Yes" else "No"      # Dry Run / No Change Required: grey, like No
+                fill, font = _YES_NO_COLORS[(value, col in _ATTENTION_COLUMNS)]
                 cell.fill, cell.font = fill, font
                 cell.alignment = Alignment(horizontal="center", vertical="top")
     return ws
@@ -225,13 +234,30 @@ def _location_row(record_id, o):
     }
 
 
+NOT_ADDED = "Manual Review Required:"
+
+
+def _review_reason(reason):
+    """The reason a location wasn't created, after NOT_ADDED: "Manual Review
+    Required: An existing REDCap record is at this address: record 972 (...)"."""
+    reason = (reason or "").strip()
+    if not reason:
+        return NOT_ADDED
+    return f"{NOT_ADDED} {reason[0].upper()}{reason[1:]}"
+
+
 def write_report(path, results, outcomes, dry_run, suggest_websites=False):
     summary, others, created, details = [], [], [], []
     for r in results:
         outcome = outcomes.get(r.record_id, (False, ""))
         summary.append(summary_row(r, outcome, dry_run, suggest_websites))
         for o in r.other_locations:
-            (created if o.new_record_id else others).append(_location_row(r.record_id, o))
+            if o.new_record_id:
+                created.append(_location_row(r.record_id, o))
+            else:
+                row = _location_row(r.record_id, o)
+                row[REASON_HEADER] = _review_reason(o.reason)
+                others.append(row)
         for f in r.fields:
             details.append({
                 "record_id": r.record_id, "field": LABELS[f.key], "in_redcap": f.on_file,
@@ -243,7 +269,7 @@ def write_report(path, results, outcomes, dry_run, suggest_websites=False):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     _sheet(wb, "Record Summary", SUMMARY_COLUMNS, summary, wrap=("notes",))
-    _sheet(wb, "Other Locations", OTHER_LOCATIONS_COLUMNS, others)
     _sheet(wb, "New Records Added", CREATED_COLUMNS, created)
+    _sheet(wb, "New Records - Failed to add", OTHER_LOCATIONS_COLUMNS, others)
     _sheet(wb, "Field Details", DETAIL_COLUMNS, details)
     wb.save(path)

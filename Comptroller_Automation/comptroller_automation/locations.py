@@ -5,7 +5,7 @@ A location found on the site becomes a new REDCap record only if:
   - its name belongs to the same organization,
   - it has a name, street number, city, state and ZIP and isn't marked closed,
   - it isn't already in REDCap (same street number and ZIP).
-Everything else goes to the "Other Locations" sheet with the reason.
+Everything else goes to the "New Records - Failed to add" sheet with the reason.
 """
 
 import html
@@ -14,6 +14,7 @@ from urllib.parse import urldefrag, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
+from .ai import check_location_names
 from .extract import Location, extract_page, page_heading
 from .normalize import house_number, host, name_similarity, same_location, street_key, zip5
 from .scraper import FetchError, fetch_page
@@ -167,6 +168,7 @@ def distinct_locations(locations):
             keep.url, keep.own_page = loc.url, True
             if loc.name:            # the location's own page names it best
                 keep.name = loc.name
+        keep.closed = keep.closed or loc.closed
     return list(merged.values())
 
 
@@ -200,12 +202,84 @@ def name_new_locations(locations, parent_name):
             counts[n.lower()] = counts.get(n.lower(), 0) + 1
     cleaned = ["" if _is_city_label(n, l.city) else n for n, l in zip(cleaned, locations)]
     for loc, name in zip(locations, cleaned):
+        loc.site_name = name            # the name as the website gives it, if any
         if not name:
             name = f"{parent_name} - {loc.city.title()}" if loc.city else ""
         elif counts.get(name.lower(), 0) > 1 and loc.city:
             name = f"{name} - {loc.city.title()}"
         loc.name = name
     return locations
+
+
+_STREET_SUFFIXES = {"ST", "STREET", "RD", "ROAD", "AVE", "AVENUE", "BLVD", "BOULEVARD", "DR", "DRIVE", "LN", "LANE",
+                    "PKWY", "PARKWAY", "HWY", "HIGHWAY", "FWY", "FREEWAY", "CIR", "CIRCLE", "CT", "COURT", "PL",
+                    "PLACE", "WAY", "TRL", "TRAIL"}
+_DIRECTIONS = {"N", "S", "E", "W", "NW", "NE", "SW", "SE", "NORTH", "SOUTH", "EAST", "WEST"}
+
+
+_FACILITY_WORDS = {
+    "clinic", "clinics", "center", "centers", "centre", "hospital", "hospitals", "health", "healthcare", "medical",
+    "medicine", "office", "offices", "program", "programs", "services", "pharmacy", "er", "emergency", "urgent",
+    "care", "campus", "practice", "psychiatry", "psychiatric", "behavioral", "counseling", "therapy", "rehab",
+    "rehabilitation", "recovery", "wellness", "institute", "pavilion", "home", "homes", "ranch", "lab", "labs",
+    "laboratory", "imaging", "surgery", "surgical", "pediatric", "pediatrics", "family", "physicians", "associates",
+    "group", "residential", "treatment", "dental", "dentistry", "hospice", "residence", "village", "academy",
+}
+_NOT_A_TITLE = re.compile(r"^(our|your|all|view|find|see|more|other|nearby|about|meet|search)\b", re.I)
+
+
+def clearly_a_name(name, org_name):
+    """A name the code can trust without asking the AI: at least two words,
+    not starting like a heading ("Our Locations"), and containing the
+    organization's own name or a facility word ("... Health Center")."""
+    words = re.findall(r"[a-z0-9']+", (name or "").lower())
+    if len(words) < 2 or _NOT_A_TITLE.match(name):
+        return False
+    return bool(set(words) & _FACILITY_WORDS) or bool(set(words) & brand_words(org_name))
+
+
+def check_names_with_ai(locations, ai, org_name, parent_name):
+    """Have the local AI confirm each name taken from the website. Text that
+    isn't a location name ("Send us a message" written above an address) is
+    replaced with "<parent> - <City>", with a note saying so."""
+    # The AI takes ~15-20 s per name on a CPU, so it only sees the doubtful
+    # ones; "Diamond Hill Health Center" needs no second opinion.
+    names = list(dict.fromkeys(l.site_name for l in locations
+                               if l.site_name and not l.closed and not clearly_a_name(l.site_name, org_name)))
+    if not names:
+        _make_names_unique(locations)
+        return
+    verdicts = check_location_names(ai, org_name, names)
+    for loc in locations:
+        if loc.site_name and verdicts.get(loc.site_name) is False and loc.city:
+            loc.name_note = (f'the website text "{loc.site_name}" above this address isn\'t a location name '
+                             f"(checked by the local AI), so it is named after the organization")
+            loc.name = f"{parent_name} - {loc.city.title()}"
+    _make_names_unique(locations)
+
+
+def _make_names_unique(locations):
+    """Two new records never share a name: a repeated "<organization> -
+    <City>" gets its street added ("... - San Antonio - High Ridge")."""
+    counts = {}
+    for loc in locations:
+        counts[loc.name.lower()] = counts.get(loc.name.lower(), 0) + 1
+    for loc in locations:
+        if counts.get(loc.name.lower(), 0) > 1:
+            street = _street_name_words(loc.street)
+            if street:
+                loc.name = f"{loc.name} - {street}"
+
+
+def _street_name_words(street):
+    """ "High Ridge" from "4040 High Ridge Circle" """
+    words = re.sub(r"^\s*\d+\w*\s+", "", street or "").split(",")[0]
+    words = re.split(r"\s(?:suite|ste|unit|bldg|building|floor|fl|room|rm)\b\.?|\s#", words, flags=re.I)[0].split()
+    if words and words[0].upper().rstrip(".") in _DIRECTIONS:
+        words = words[1:]                       # "NW Loop 410" -> "Loop 410"
+    if len(words) > 1 and words[-1].upper().rstrip(".") in _STREET_SUFFIXES:
+        words = words[:-1]                      # "High Ridge Circle" -> "High Ridge"
+    return " ".join(words[:3]).title()
 
 
 # Marks of a separate provider's name: a doctor's title or credentials, or a
@@ -225,7 +299,7 @@ def looks_like_directory(locations, org_name, site):
 
 
 def ineligible_reason(loc):
-    if _CLOSED.search(loc.name or ""):
+    if loc.closed or _CLOSED.search(loc.name or ""):
         return "location appears closed"
     if _ADMIN.search(loc.name or ""):
         return "administrative or billing office, not a service location"
