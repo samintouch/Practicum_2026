@@ -1,6 +1,27 @@
 # Duplicate Checker Manual
 
-## What this is about
+## Contents
+
+1. [Purpose of the Duplicate Checker](#1-purpose-of-the-duplicate-checker)
+2. [Setting up a computer to run it](#2-setting-up-a-computer-to-run-it)
+3. [Connecting to REDCap](#3-connecting-to-redcap)
+4. [How to run the app](#4-how-to-run-the-app)
+5. [What the checker folder contains](#5-what-the-checker-folder-contains)
+6. [What the program produces](#6-what-the-program-produces)
+7. [How it works: finding the possible duplicates](#7-how-it-works-finding-the-possible-duplicates)
+8. [Step 1: Put names and addresses into the same format](#8-step-1-put-names-and-addresses-into-the-same-format)
+9. [Step 2: Filter out the records that are clearly NOT duplicates](#9-step-2-filter-out-the-records-that-are-clearly-not-duplicates)
+10. [Step 3: Confirm the records that clearly ARE duplicates](#10-step-3-confirm-the-records-that-clearly-are-duplicates)
+11. [Step 4: Set aside cases where people have decided both ways before](#11-step-4-set-aside-cases-where-people-have-decided-both-ways-before)
+12. [Step 5: Check the facility's website (only for the remaining cases)](#12-step-5-check-the-facilitys-website-only-for-the-remaining-cases)
+13. [Step 6: Ask an AI assistant about what is left (on by default)](#13-step-6-ask-an-ai-assistant-about-what-is-left-on-by-default)
+14. [Step 7: Put the pairs together and pick the record to keep](#14-step-7-put-the-pairs-together-and-pick-the-record-to-keep)
+15. [How well it works](#15-how-well-it-works)
+16. [Limits to keep in mind](#16-limits-to-keep-in-mind)
+
+---
+
+## 1. Purpose of the Duplicate Checker
 
 The Duplicate Checker checks a list of possible duplicate records that was created by another
 program (the `Comptroller.R` script), and works out which records on that list are **true
@@ -17,7 +38,7 @@ cases it cannot settle.
 the ones that clearly *are*, and only then looks more closely at the hard cases. Anything it is not
 sure about is marked **"Manual review required"** for a person to check.
 
-## Setting up a computer to run it
+## 2. Setting up a computer to run it
 
 These steps are needed once per computer. The commands are written for Windows PowerShell. A
 computer with at least 16 GB of memory is recommended. A graphics card is not needed, but the AI
@@ -88,7 +109,7 @@ step is faster with one.
    the program still checks the duplicates and fills in the Tracking Duplicates tab, but it cannot
    update REDCap.
 
-## Connecting to REDCap
+## 3. Connecting to REDCap
 
 The program can only update REDCap if it knows the project's **API address** and an **API
 token** (a personal key that works like a password). Both are kept in a small settings file
@@ -119,7 +140,7 @@ part-way through an update, the program also stops and says which records may ha
 In either case, run the program **without** `--apply` until the problem is fixed. It will still
 check the duplicates and fill in the Tracking Duplicates tab.
 
-## How to run the app
+## 4. How to run the app
 
 Open PowerShell and change directory (`cd`) into the `Duplicate_Checker` folder first - the one
 that contains the `checker` folder:
@@ -158,6 +179,57 @@ changed. When the run also updates REDCap (`--apply`), the same copy also gets a
 Updates"** tab, right after "Tracking Duplicates". It lists every record that was changed, with its
 old values, so any change can be undone.
 
+### Console Output
+
+```
+Please wait, processing: ComptrollerProject20_DATA_LABELS_2026-10-27_1831.csv
+REDCap          : Comptroller Project (project 20, PRODUCTION)
+This run will update REDCap project "Comptroller Project (project 20, PRODUCTION)" with the duplicates it finds.
+Continue? (y/n): y
+Duplicates      : Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx
+Comptroller Data: ComptrollerProject20_DATA_LABELS_2026-10-27_1831.csv
+Checking 2 groups / 6 records
+AI model        : qwen2.5:7b at http://localhost:11434
+Pre-screen: 4 of 6 record pairs settled by rules
+Checking websites for 2 records (5 have a URL)...
+  record 237: https://www.md.com/doctor/matt-sloan-md
+  record 310: https://www.mapquest.com/us/texas/best-pain-rehabilitation-center-418933430
+  done in 24s: MATCH 1, NOT_FOUND 1
+[1/2] group 81: 145: Duplicate - keep (primary), 5015: Duplicate of 145
+[2/2] group 110: 1691: Not a duplicate, 237: Not a duplicate, 185: Not a duplicate, 310: Not a duplicate
+Comparisons done in 24s
+Tracking Duplicates tab (2 rows) saved in: output\Comptroller_Updates_Syeda_7.6.26_10-08-2026_app_review_2026-10-31_0930.xlsx
+
+REDCap project: Comptroller Project (project 20, PRODUCTION)
+  record    145 [kept     ] (Texas Health Seay Behavioral Health Center Plano): update
+  record   5015 [dup of 145] (Texas Health Seay Behavioral Health Hospital): update
+REDCap: 2 updated, 0 skipped
+REDCap Updates tab (old values, for undo) added to: output\Comptroller_Updates_Syeda_7.6.26_10-08-2026_app_review_2026-10-31_0930.xlsx
+```
+
+- **`Please wait, processing: ...`** prints immediately, before anything else loads, so there's no
+  silent pause right after pressing Enter.
+- With `--apply`, the program shows which **REDCap project** it's about to update and asks
+  **Continue? (y/n)** before doing any of the actual checking - so a wrong project or expired token
+  is caught right away, not after waiting through the whole run. Without `--apply`, these two lines
+  don't appear at all, and nothing is ever sent to REDCap.
+- **`Checking N groups / M records`** is the size of this run, after `--group-ids` or `--limit`
+  (if used) have narrowed it down.
+- The **AI** line shows which model is running, or explains why it's off (`--no-ai`, or Ollama isn't
+  reachable).
+- **`Pre-screen: ...`** is how many record pairs the rules alone could already settle, with no
+  website or AI needed.
+- **`Checking websites for N records (M have a URL)...`** is followed by one line per record as its
+  website is actually visited (printed as each one starts, so lines from different records can
+  interleave), then a summary line once they're all done.
+- **`[n/total] group <id>: ...`** is printed as each group finishes, with the recommendation found
+  for every record in it.
+- **`Tracking Duplicates tab (N rows) saved in: ...`** is the file this run produced - keep this path
+  handy, it's what gets opened to review the results.
+- With `--apply`, after the regular comparisons are shown, the program lists what it's about to do
+  to REDCap for **each** record (`update` or `skip - <reason>`), followed by how many it actually
+  updated, and where the undo information (the **"REDCap Updates"** tab) was saved.
+
 Useful additions to the command:
 
 | Add | What it does |
@@ -171,7 +243,7 @@ Without the AI (`--no-ai`), a run takes a few minutes. With the AI (the default)
 30 to 60 minutes for a few hundred groups. Every run starts fresh: it visits the websites again and
 asks the AI again, so the results always reflect what the websites show on the day of the run.
 
-## What the checker folder contains
+## 5. What the checker folder contains
 
 The program itself is the `checker` folder. Each file has one job:
 
@@ -191,7 +263,7 @@ The program itself is the `checker` folder. Each file has one job:
 | `requirements.txt` | The list of Python packages installed in setup step 2. |
 | `README.md` | Technical notes for whoever maintains the program. |
 
-## What the program produces
+## 6. What the program produces
 
 After the program finishes, it saves a new copy of the duplicates workbook in an **`output`**
 folder, created under the `Duplicate_Checker` folder. The copy's file name includes `_app_review_`
@@ -272,7 +344,7 @@ Afterwards, the Tracking Duplicates tab shows what happened. Records that were n
 example because the record could not be found in REDCap, are explained in the "notes (add to
 redcap)" column. Records that were updated are listed in the "notes from automation" column.
 
-## How it works: finding the possible duplicates
+## 7. How it works: finding the possible duplicates
 
 A separate script (written in R) scans the whole directory and puts records into **groups of
 possible duplicates**. It flags two records when they are in the same city and either their names
@@ -285,7 +357,7 @@ similar. The Duplicate Checker's job is to sort these groups out.
 
 Within each group, the program compares **every pair** of records, one pair at a time.
 
-## Step 1: Put names and addresses into the same format
+## 8. Step 1: Put names and addresses into the same format
 
 The same place can be written in many ways. Before comparing anything, the program rewrites names
 and addresses into one standard form, so that formatting differences do not get in the way.
@@ -304,7 +376,7 @@ Names are compared by their distinctive words. Common words like "Health", "Cent
 "Medical" are not counted as a match on their own, because hundreds of unrelated facilities share
 them.
 
-## Step 2: Filter out the records that are clearly NOT duplicates
+## 9. Step 2: Filter out the records that are clearly NOT duplicates
 
 These rules remove the most common false alarms. No website or AI is needed.
 
@@ -322,14 +394,14 @@ These rules remove the most common false alarms. No website or AI is needed.
 If the two records have the same phone number, the program does not apply these rules, because a
 shared phone number is a strong hint that they may be the same place.
 
-## Step 3: Confirm the records that clearly ARE duplicates
+## 10. Step 3: Confirm the records that clearly ARE duplicates
 
 3. **Same or similar name at the same address.** If the names match (or share distinctive words)
    and the addresses are the same once standardized, the records are **duplicates**.
    *Example: "Texas Health Seay Behavioral Health Hospital" at "6110 W Parker Rd" and "Texas Health
    Seay Behavioral Health Center Plano" at "6110 West Parker Road".*
 
-## Step 4: Set aside cases where people have decided both ways before
+## 11. Step 4: Set aside cases where people have decided both ways before
 
 4. **An individual provider's name at an organization's address.** Sometimes one record is a
    person (for example "Dr Frank Murphy" or "Jane Smith MD") and the other is a practice at the
@@ -339,7 +411,7 @@ shared phone number is a strong hint that they may be the same place.
 
 In testing, Steps 2 to 4 settled about half of all record pairs without needing anything else.
 
-## Step 5: Check the facility's website (only for the remaining cases)
+## 12. Step 5: Check the facility's website (only for the remaining cases)
 
 For pairs that are still undecided, the program opens each record's website (the link stored in
 REDCap) and reads it, the way a reviewer would:
@@ -372,7 +444,7 @@ name have to actually appear on the page - so the AI can suggest an address but 
 This isn't used for email or phone numbers, which the program always finds with plain pattern
 matching, not AI.
 
-## Step 6: Ask an AI assistant about what is left (on by default)
+## 13. Step 6: Ask an AI assistant about what is left (on by default)
 
 This step runs by default. With `--no-ai`, it's skipped: the hard cases that remain are simply
 marked **"Manual review required"**, and the program runs on rules and website checks alone.
@@ -407,7 +479,7 @@ shows Regency's phone number. The AI judged them to be the same facility. The NP
 supports this: Regency was an older hospital at that building, and Carrollton Springs has been
 there since 2011.*
 
-## Step 7: Put the pairs together and pick the record to keep
+## 14. Step 7: Put the pairs together and pick the record to keep
 
 Once every pair in a group is decided, records that were matched as duplicates are joined
 together. If A matches B and B matches C, then A, B and C are all the same facility.
@@ -424,7 +496,7 @@ Every record then ends up in one of three places:
 | **Not a duplicate** | A different facility, or a different location of the same organization. |
 | **Manual review required** | The evidence is unclear. A person should decide. |
 
-## How well it works
+## 15. How well it works
 
 The program was tested on 60 groups (140 records) that had already been reviewed by hand. Of
 these, 76 records had a manual decision to compare against:
@@ -447,7 +519,7 @@ On the full list of 285 groups (655 records), with the AI, it found 418 records 
 duplicates and 189 that are duplicates, and it set aside 48 for manual review. That is about 7%
 of the records, instead of all of them.
 
-## Limits to keep in mind
+## 16. Limits to keep in mind
 
 - The program only compares records **within the same group** from the R scan. Two duplicates that
   the scan put in different groups will not be compared.
