@@ -4,14 +4,14 @@ Checks each REDCap facility record against the facility's own website. Where the
 
 The full operations manual is [Comptroller_Automation.md](../Comptroller_Automation.md), one folder up.
 
-This README sits with the code (`Comptroller_Automation/comptroller_automation/`). Run every command below from the **`Comptroller_Automation` folder**, one level up, where `requirements.txt`, `redcap_config.py` and your export file are.
+This README sits with the code (`Comptroller_Automation/comptroller_automation/`). Run every command below from the **`Comptroller_Automation` folder**, one level up, where `redcap_config.py` and your export file are.
 
 **Fields checked:** facility name, street, city, state, ZIP, county, phone, fax, email, website, and Facebook, Instagram, Twitter/X, TikTok, YouTube and WhatsApp.
 
 ## Setup
 
 ```
-pip install -r requirements.txt
+pip install -r comptroller_automation/requirements.txt
 playwright install chromium
 copy redcap_config.py.sample redcap_config.py     # then fill in api_url and api_token
 ```
@@ -101,7 +101,7 @@ The tool reads the site's "Locations" pages, and its contact pages, for other of
 
 **Location names are checked.** Text written next to an address isn't always a name. Buttons and headings ("Send us a message", "Contact us", "Book an appointment") are rejected. A status line ("PERMANENTLY CLOSED") marks the location as closed, and the name is taken from the line above it. Names that are clearly names, with at least two words including a facility word (clinic, center, hospital, health …) or the organization's own name, are accepted as they are. When the local AI is available, it checks only the doubtful rest, one at a time (about 5 seconds each on a CPU). Its answers are remembered in `comptroller_automation/cache/name_checks.json`, so a name is never asked about twice. A name it doesn't confirm is replaced with "&lt;organization&gt; - &lt;City&gt;", and the `note` column says so. Two new locations never share a name: "&lt;organization&gt; - San Antonio - High Ridge" and "… - San Antonio - Loop 410".
 
-A new record's website is the location's own page when the site has one, for example `…/locations/diamond-hill-health-center`, not the `/locations` list. The tool recognizes it when the location's name links to it, or when the page address matches the name. An unnamed location is called "&lt;organization&gt; - &lt;City&gt;". If no phone can be found for the location, the new record uses the parent record's phone (the updated number when this run updates the parent too); the `note` column on New Records Added says so. The fax is never copied from the parent, so it stays blank unless the location lists its own. Each new record is set to Open, with "completed record from Phase 1" = No, and a comment naming the parent record.
+A new record's website is the location's own page when the site has one, for example `…/locations/diamond-hill-health-center`, not the `/locations` list. The tool recognizes it when the location's name links to it, or when the page address matches the name. An unnamed location, or one the site labels only by city ("Plano, TX", "Frisco Office"), is called "&lt;organization&gt; - &lt;City&gt;". If no phone can be found for the location, the new record uses the parent record's phone (the updated number when this run updates the parent too); the `note` column on New Records Added says so. The fax is never copied from the parent, so it stays blank unless the location lists its own. Each new record is set to Open, with "completed record from Phase 1" = No, and a comment naming the parent record.
 
 Locations that don't qualify go on the "New Records - Failed to add" sheet with the reason.
 
@@ -156,7 +156,7 @@ Each updated record also gets these fields set (configured in `fields.py`, in th
 - `validated` = Yes
 - `validation_date` = today
 - `ogcomplete` (completed record from Phase 1) = Yes
-- a dated note in `change_explain` and `general_comments`
+- a dated note at the top of `change_explain` and `general_comments`; any earlier note follows after a blank line, under "Previous note: <previous validation_date>"
 
 ## Report
 

@@ -101,19 +101,25 @@ def apply_changes(client, result):
         return False, "not written: some fields need manual review"
 
     variables = [redcap_var(f.key) for f in changes]
-    live = client.export_record(result.record_id, variables + [CHANGE_NOTE_FIELD, COMMENTS_FIELD])
+    live = client.export_record(result.record_id,
+                                variables + [CHANGE_NOTE_FIELD, COMMENTS_FIELD, VALIDATION_DATE_FIELD])
     stale = [f"{LABELS[f.key]} is now {live.get(redcap_var(f.key), '')!r}"
              for f in changes if (live.get(redcap_var(f.key)) or "").strip() != f.on_file.strip()]
     if stale:
         return False, "skipped, record changed in REDCap since the export: " + "; ".join(stale)
 
     today = datetime.date.today().isoformat()
-    note = (f"Automated website verification on {today} ({result.record['website']}):\n"
+    # A website change gets its own line below, so the URL isn't repeated here.
+    note = (f"Automated website verification on {today}:\n"
             + "\n".join(change_lines(result)))
     values = {redcap_var(f.key): f.new_value for f in changes}
+    # The new note goes first; the old one follows, dated by the record's
+    # previous validation date when it has one.
+    old_date = (live.get(VALIDATION_DATE_FIELD) or "").strip()
+    previous = f"Previous note: {old_date}" if old_date else "Previous note:"
     for note_field in (CHANGE_NOTE_FIELD, COMMENTS_FIELD):
         existing = (live.get(note_field) or "").strip()
-        values[note_field] = f"{existing}\n\n{note}" if existing else note
+        values[note_field] = f"{note}\n\n{previous}\n{existing}" if existing else note
     values[CHANGE_FLAG_FIELD] = "1"
     values[VALIDATED_FIELD] = "1"
     values[VALIDATION_DATE_FIELD] = today

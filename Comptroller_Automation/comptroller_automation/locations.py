@@ -185,10 +185,25 @@ def clean_name(name):
     return re.sub(r"\s+", " ", name).strip(" |-,:")
 
 
+# "Plano, TX" / "Fort Worth, Texas 76104": a place, up to three words.
+_CITY_STATE = re.compile(r"^([A-Za-z.'\-]+(?: [A-Za-z.'\-]+){0,2}),\s*([A-Z]{2}|Texas)(\s+\d{5}(-\d{4})?)?$")
+
+
 def _is_city_label(name, city):
-    """"Mckinney Location:", "Frisco Office" and the like."""
+    """"Mckinney Location:", "Frisco Office", "Plano, TX" and the like."""
     rest = re.sub(r"\b(location|office|campus|clinic|branch)s?\b|[:\-]", " ", name, flags=re.I).strip()
-    return not rest or rest.lower() == (city or "").lower()
+    if not rest or rest.lower() == (city or "").lower():
+        return True
+    # A "<place>, <state>" heading, unless the place part reads like a
+    # facility ("Children's Health, TX").
+    m = _CITY_STATE.match(name.strip(" :-"))
+    return bool(m) and not set(re.findall(r"[a-z']+", m.group(1).lower())) & _FACILITY_WORDS
+
+
+def _city(loc):
+    """The city as written ("McKinney"), title-cased only if all caps or lower."""
+    c = loc.city or ""
+    return c.title() if c.isupper() or c.islower() else c
 
 
 def name_new_locations(locations, parent_name):
@@ -204,9 +219,9 @@ def name_new_locations(locations, parent_name):
     for loc, name in zip(locations, cleaned):
         loc.site_name = name            # the name as the website gives it, if any
         if not name:
-            name = f"{parent_name} - {loc.city.title()}" if loc.city else ""
+            name = f"{parent_name} - {_city(loc)}" if loc.city else ""
         elif counts.get(name.lower(), 0) > 1 and loc.city:
-            name = f"{name} - {loc.city.title()}"
+            name = f"{name} - {_city(loc)}"
         loc.name = name
     return locations
 
@@ -254,7 +269,7 @@ def check_names_with_ai(locations, ai, org_name, parent_name):
         if loc.site_name and verdicts.get(loc.site_name) is False and loc.city:
             loc.name_note = (f'the website text "{loc.site_name}" above this address isn\'t a location name '
                              f"(checked by the local AI), so it is named after the organization")
-            loc.name = f"{parent_name} - {loc.city.title()}"
+            loc.name = f"{parent_name} - {_city(loc)}"
     _make_names_unique(locations)
 
 

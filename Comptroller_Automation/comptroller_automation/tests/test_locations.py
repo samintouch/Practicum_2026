@@ -41,3 +41,11 @@ def test_ai_values_must_be_on_the_page():
     invented, _ = _grounded({"street": "12 Fake Rd", "city": "Dallas", "state": "TX", "zip": "75240",
                              "phone": "", "fax": "", "email": "", "name": ""}, page, "u")
     assert invented is None
+
+
+def test_city_state_heading_is_named_after_the_parent():
+    locs = [loc("1 Main St", name="Plano, TX", city="Plano"), loc("2 Elm St", name="McKinney, TX", city="McKinney"),
+            loc("3 Oak St", name="Dallas, Texas 75201", city="Dallas"), loc("4 Pine St", name="Children's Health, TX")]
+    names = [l.name for l in name_new_locations(locs, "Acme Counseling")]
+    assert names == ["Acme Counseling - Plano", "Acme Counseling - McKinney", "Acme Counseling - Dallas",
+                     "Children's Health, TX"]

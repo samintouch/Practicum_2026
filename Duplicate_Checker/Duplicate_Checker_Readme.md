@@ -183,7 +183,12 @@ old values, so any change can be undone.
 
 ```
 Please wait, processing: ComptrollerProject20_DATA_LABELS_2026-10-27_1831.csv
-REDCap          : Comptroller Project (project 20, PRODUCTION)
+========================================================================
+--apply is set: this run WILL write changes to REDCap.
+  REDCap project : Comptroller Project (Project ID: 20)
+  API URL        : https://redcap.sph.uth.edu/api/
+  Status         : PRODUCTION
+========================================================================
 This run will update REDCap project "Comptroller Project (project 20, PRODUCTION)" with the duplicates it finds.
 Continue? (y/n): y
 Duplicates      : Comptroller_Updates_Syeda_7.6.26_10-08-2026.xlsx
@@ -209,10 +214,11 @@ REDCap Updates tab (old values, for undo) added to: output\Comptroller_Updates_S
 
 - **`Please wait, processing: ...`** prints immediately, before anything else loads, so there's no
   silent pause right after pressing Enter.
-- With `--apply`, the program shows which **REDCap project** it's about to update and asks
-  **Continue? (y/n)** before doing any of the actual checking - so a wrong project or expired token
-  is caught right away, not after waiting through the whole run. Without `--apply`, these two lines
-  don't appear at all, and nothing is ever sent to REDCap.
+- With `--apply`, the program prints a banner showing exactly which **REDCap project**, **API URL**
+  and **Status** (development or PRODUCTION) it's about to write to, then asks **Continue? (y/n)** -
+  all before doing any of the actual checking, so a wrong project, wrong environment, or expired
+  token is caught right away, not after waiting through the whole run. Without `--apply`, none of
+  this appears, and nothing is ever sent to REDCap.
 - **`Checking N groups / M records`** is the size of this run, after `--group-ids` or `--limit`
   (if used) have narrowed it down.
 - The **AI** line shows which model is running, or explains why it's off (`--no-ai`, or Ollama isn't
@@ -329,7 +335,7 @@ answers **y** when the program asks at the start, does it record its decisions i
 - both are marked **Validation = Yes** with **today's date** as the Validation Date.
 
 The new note goes at the top of "Additional Comments". Any comment already there is kept
-underneath it, after a line showing the record's previous validation date.
+underneath it, after a blank line and a line showing the record's previous validation date.
 
 **The checker's decision always wins over a conflicting one already in REDCap.** Whatever REDCap
 already shows for a record - blank, or a different answer a reviewer entered earlier - the program

@@ -86,12 +86,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.apply:
         try:
             redcap = RedcapClient.from_config(REDCAP_CONFIG)
-            redcap_title = redcap.project_title()
+            info = redcap.project_info()
             redcap.check_fields()
         except RedcapError as exc:
             _redcap_failed(exc, REDCAP_CONFIG, during="connect")
             return 2
-        print(f"REDCap          : {redcap_title}")
+        in_production = str(info.get("in_production")) == "1"
+        redcap_title = f"{info.get('project_title')} (project {info.get('project_id')}" + \
+                       (", PRODUCTION)" if in_production else ", development)")
+        print("=" * 72)
+        print("--apply is set: this run WILL write changes to REDCap.")
+        print(f"  REDCap project : {info.get('project_title')} (Project ID: {info.get('project_id')})")
+        print(f"  API URL        : {redcap.url}")
+        print(f"  Status         : {'PRODUCTION' if in_production else 'development'}")
+        print("=" * 72)
         if not args.yes:
             # ask now, before the long run, so the update at the end doesn't wait for anyone
             if not sys.stdin.isatty():

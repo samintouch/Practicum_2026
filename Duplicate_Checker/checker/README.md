@@ -211,10 +211,11 @@ For every set of records found to be the same facility (e.g. 145 and 5015):
 | Additional Comments (`general_comments`) | `From automation: duplicate with 145` | `From automation: \nId: 5015 is duplicate of Id: 145` (several duplicates: `From automation: \nId: 256, 312 are duplicate of Id: 145`) |
 
 The new comment goes at the **top**. If the record already had a comment, it's kept underneath,
-after a line showing the record's old validation date:
+after a blank line and a line showing the record's old validation date:
 
 ```
 From automation: duplicate with 13
+
 Previous note: 07-26-2026
 The facility appears to be permanently closed per the Google listing.
 ```
@@ -238,9 +239,10 @@ change can be undone.
 
 The REDCap URL and token are read from `redcap_config.py` (`config = dict(api_url=..., api_token=...)`)
 or from the `REDCAP_API_URL` / `REDCAP_API_TOKEN` environment variables. The token is on the
-project's **API** page in REDCap (left menu, under *Applications*). The project name is shown before
-you confirm. Check it's the project you mean to change. Keep `redcap_config.py` private; it
-contains your API token.
+project's **API** page in REDCap (left menu, under *Applications*). Before asking for confirmation,
+the program prints a banner with the **project name, project ID, API URL and status** (development
+or PRODUCTION) - check it's the project and environment you mean to change. Keep `redcap_config.py`
+private; it contains your API token.
 
 **When REDCap can't be reached.** REDCap is only contacted with `--apply`, and the connection is
 checked before anything else runs. If the token or address is missing, malformed, rejected or wrong,

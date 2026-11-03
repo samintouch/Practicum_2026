@@ -122,8 +122,11 @@ class RedcapClient:
             raise RedcapError(f"the answer from {self.url} was not REDCap API data. Check api_url points to "
                               "the REDCap API (it usually ends with /api/)") from exc
 
+    def project_info(self) -> dict:
+        return self._post(content="project")
+
     def project_title(self) -> str:
-        info = self._post(content="project")
+        info = self.project_info()
         return f"{info.get('project_title')} (project {info.get('project_id')}" + \
                (", PRODUCTION)" if str(info.get("in_production")) == "1" else ", development)")
 
@@ -241,17 +244,18 @@ def _mdy(ymd: str) -> str:
 
 
 def new_comment_text(comment: str, old_comments: str, old_validation_date: str) -> str:
-    """Our comment first; any existing comment is never overwritten - it's kept below ours,
-    introduced by the old validation date, so both exist as a history:
+    """Our comment first; any existing comment is never overwritten - it's kept below ours, after a
+    blank line, introduced by the old validation date, so both exist as a history:
 
         From automation: duplicate with 145
+
         Previous note: 07-11-2026
         <existing comment, unchanged>
     """
     if not old_comments.strip():
         return comment
     previous = f"Previous note: {_mdy(old_validation_date)}".rstrip()
-    return f"{comment}\n{previous}\n{old_comments}"
+    return f"{comment}\n\n{previous}\n{old_comments}"
 
 
 def describe_changes(p: PlannedUpdate) -> str:

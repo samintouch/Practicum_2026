@@ -296,7 +296,7 @@ The name of a location found in a website's text is usually the line just above 
 
 ### What a new record contains
 
-- **Name:** The location's own name, as checked below. If it has none, or the site only labels it by city (for example, "Frisco Location"), it is named "&lt;organization&gt; - &lt;City&gt;". When several locations share the same name, "- &lt;City&gt;" is added so that each record is distinct.
+- **Name:** The location's own name, as checked below. If it has none, or the site only labels it by city (for example, "Frisco Location" or "Plano, TX"), it is named "&lt;organization&gt; - &lt;City&gt;". When several locations share the same name, "- &lt;City&gt;" is added so that each record is distinct.
 - **Street, city, state, ZIP,** from the website.
 - **County,** looked up from the address with the U.S. Census geocoder, or OpenStreetMap's Nominatim as a backup. Left blank if it can't be found; never guessed.
 - **Phone, fax, and email** of that location. If no phone can be found for the location, the parent record's phone is used, and staff can correct it later if needed. When the same run also updates the parent record's phone from the website, the updated number is used. The `note` column on the New Records Added tab says when this happened, for example, *"phone not listed for this location; taken from parent record 19."* The fax is **never** copied from the parent; it is left blank unless the location lists its own fax number.
@@ -331,7 +331,7 @@ You need **Python 3.11 or later**. If Python isn't installed, download it from [
 From the `Comptroller_Automation` folder, install the required packages:
 
 ```
-pip install -r requirements.txt
+pip install -r comptroller_automation/requirements.txt
 ```
 
 Then install the headless Chromium browser once:
@@ -534,7 +534,7 @@ Records marked as duplicates in REDCap are checked like any other record.
 1. Open the `summary_….xlsx` workbook for the run. It is on the Record Summary tab.
 2. Filter `notes` to hide `Record up to date: No Change Required`, so only records with something to act on remain.
 3. For each row where `manual_review_required` = **Yes**, read the notes and open the Field Details tab for that record. Check the website and REDCap side by side, and update REDCap manually where appropriate.
-4. For each row where `updated_redcap_record` = **Yes**, REDCap has already been updated. The same notes were added to that record's Additional Comments and "change explanation" fields, so REDCap itself shows what changed and when.
+4. For each row where `updated_redcap_record` = **Yes**, REDCap has already been updated. The same notes were added to that record's Additional Comments and "change explanation" fields, so REDCap itself shows what changed and when. The new note goes at the top. Any earlier note follows after a blank line, under "Previous note: <date of the last validation>".
 5. Check rows where `ai_assisted` = **Yes,** a little more carefully. The AI's values were confirmed to be on the website, but they are worth a quick look.
 6. Open the **New Records Added** tab. These records are already in REDCap (after `--apply`). Spot-check a few, and complete their remaining fields (services, accreditation, and so on) as for any new record.
 7. Open the **New Records - Failed to add** tab. Read each reason (the *"These new locations are not added because of the following reason"* column) and decide whether the location should be added by hand.
